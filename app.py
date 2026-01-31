@@ -38,8 +38,77 @@ import yaml
 # Serve the data directory for images
 app.add_static_files('/data', str(DATA_DIR))
 
-# Disable pinch-to-zoom on mobile devices
+# Disable pinch-to-zoom on mobile devices (Meta tag + JS listeners for iOS 10+)
 ui.add_head_html('<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">')
+ui.add_head_html('''
+<script>
+    // Aggressively prevent pinch-zoom events (iOS ignores user-scalable=no)
+    document.addEventListener('gesturestart', function(e) { e.preventDefault(); });
+    document.addEventListener('gesturechange', function(e) { e.preventDefault(); });
+    document.addEventListener('gestureend', function(e) { e.preventDefault(); });
+</script>
+''')
+
+# Add iOS-specific CSS for touch interactions
+ui.add_head_html('''
+<style>
+    /* Enable touch interactions on iOS */
+    .item-card {
+        -webkit-tap-highlight-color: rgba(59, 130, 246, 0.3);
+        -webkit-touch-callout: none;
+        -webkit-user-select: none;
+        user-select: none;
+        cursor: pointer;
+        touch-action: manipulation;
+    }
+    
+    /* Active state for touch feedback */
+    .item-card:active {
+        transform: scale(0.95);
+        transition: transform 0.1s ease;
+    }
+    
+    /* Ensure child elements don't block touch events */
+    .item-card * {
+        pointer-events: none;
+    }
+    
+    /* Re-enable pointer events for admin buttons */
+    .item-card .admin-controls,
+    .item-card .admin-controls * {
+        pointer-events: auto;
+    }
+</style>
+''')
+
+# Initialize speech synthesis for iOS (requires user interaction to unlock)
+ui.add_head_html('''
+<script>
+    // iOS Safari requires an initial user interaction to enable speech synthesis
+    // This script initializes it on first touch/click
+    (function() {
+        let initialized = false;
+        
+        function initSpeech() {
+            if (!initialized && window.speechSynthesis) {
+                // Create a silent utterance to "unlock" speech synthesis on iOS
+                const utterance = new SpeechSynthesisUtterance('');
+                utterance.volume = 0;
+                speechSynthesis.speak(utterance);
+                initialized = true;
+                
+                // Remove listeners after initialization
+                document.removeEventListener('touchstart', initSpeech);
+                document.removeEventListener('click', initSpeech);
+            }
+        }
+        
+        // Listen for first user interaction
+        document.addEventListener('touchstart', initSpeech, { once: true });
+        document.addEventListener('click', initSpeech, { once: true });
+    })();
+</script>
+''')
 
 # Global state
 is_admin_mode = {"value": False}
@@ -55,31 +124,53 @@ ui.query('nicegui-content').classes('gap-0 p-0')
 def make_item_button(item, is_trash=False):
     """Create clickable item button with image support."""
 
-    def on_click():
-        if is_trash:
-            return # No action on click in trash (actions are buttons)
-            
-        if is_admin_mode["value"]:
-            open_edit_dialog(item)
-        else:
-            log_usage(item["id"])
-            # Use TTS override if available, else Label
-            text = (item.get("tts_text") or item["label"]).replace('"', '\\"')
-            ui.run_javascript(f'speechSynthesis.speak(new SpeechSynthesisUtterance("{text}"))')
-
     is_visible = item.get("visible", True)
-    # Added flex flex-col so flex-grow works
-    base_classes = "w-32 h-40 m-2 p-0 gap-0 flex flex-col items-center hover:scale-105 transition-transform cursor-pointer shadow-md relative"
+    # Added flex flex-col so flex-grow works, and item-card class for iOS touch support
+    base_classes = "item-card w-32 h-40 m-2 p-0 gap-0 flex flex-col items-center hover:scale-105 transition-transform cursor-pointer shadow-md relative"
     if not is_visible:
         base_classes += " opacity-50 grayscale border-2 border-dashed"
         
     card = ui.card().classes(base_classes)
     
     if is_trash:
-        card.classes(remove="hover:scale-105 cursor-pointer") # Disable hover/click effects
+        card.classes(remove="hover:scale-105 cursor-pointer item-card") # Disable hover/click effects
     else:
-        card.on("click", on_click)
-        
+        # INTERACTION LOGIC
+        if is_admin_mode["value"]:
+            # Admin Mode: Simple server-side click to open dialog
+            card.on("click", lambda: open_edit_dialog(item))
+            # Touch start handled by generic CSS/JS, no specific action needed
+        else:
+            # User Mode: Client-side TTS + Server-side Logging
+            
+            # Prepare safe text for JS
+            text = (item.get("tts_text") or item["label"]).replace('"', '\\"').replace("'", "\\'")
+            
+            # This JS runs IMMEDIATELY on click/tap, preserving the user gesture
+            js_handler = f'''
+                (e) => {{
+                    // iOS Fix: Explicitly cancel and resume to ensure audio context is ready
+                    window.speechSynthesis.cancel();
+                    window.speechSynthesis.resume();
+                    
+                    const utterance = new SpeechSynthesisUtterance("{text}");
+                    utterance.rate = 1.0;
+                    utterance.pitch = 1.0;
+                    utterance.volume = 1.0;
+                    
+                    window.speechSynthesis.speak(utterance);
+                    
+                    // Return true to allow the event to propagate to the server (for logging)
+                    return true; 
+                }}
+            '''
+            
+            # Bind click with JS handler for immediate feedback
+            card.on("click", lambda: log_usage(item["id"]), js_handler=js_handler)
+            
+            # Aggressive iOS wakeup on touchstart
+            card.on("touchstart", js_handler='(e) => { window.speechSynthesis.resume(); return true; }', throttle=0.0)
+
     with card:
         # Image area
         img_src = None
@@ -108,7 +199,7 @@ def make_item_button(item, is_trash=False):
         
         # Admin indicator & Controls
         if is_admin_mode["value"] and not is_trash:
-             with ui.column().classes("absolute top-1 right-1 gap-1 z-20"):
+             with ui.column().classes("admin-controls absolute top-1 right-1 gap-1 z-20"):
                 # Visibility Toggle
                 def toggle_vis(e, i_id=item["id"], c_id=item["cat_id"]):
                     e.stop_propagation()
