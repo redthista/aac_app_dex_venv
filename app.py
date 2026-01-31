@@ -47,6 +47,7 @@ ui.add_head_html('''
     document.addEventListener('gesturechange', function(e) { e.preventDefault(); });
     document.addEventListener('gestureend', function(e) { e.preventDefault(); });
 </script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Sortable/1.15.0/Sortable.min.js"></script>
 ''')
 
 # Add iOS-specific CSS for touch interactions
@@ -77,6 +78,12 @@ ui.add_head_html('''
     .item-card .admin-controls,
     .item-card .admin-controls * {
         pointer-events: auto;
+    }
+
+    /* Sortable ghost class */
+    .sortable-ghost {
+        opacity: 0.4;
+        background-color: #f3f4f6;
     }
 </style>
 ''')
@@ -112,7 +119,11 @@ ui.add_head_html('''
 
 # Global state
 is_admin_mode = {"value": False}
+is_sentence_mode = {"value": False}
+sentence_queue = []
 main_column = None
+sentence_bar_container = None
+grid_container = None
 
 # Remove default padding and gap
 ui.query('nicegui-content').classes('gap-0 p-0')
@@ -141,35 +152,48 @@ def make_item_button(item, is_trash=False):
             card.on("click", lambda: open_edit_dialog(item))
             # Touch start handled by generic CSS/JS, no specific action needed
         else:
-            # User Mode: Client-side TTS + Server-side Logging
+            # User Mode: Standard or Sentence Mode
             
             # Prepare safe text for JS
             text = (item.get("tts_text") or item["label"]).replace('"', '\\"').replace("'", "\\'")
             
-            # This JS runs IMMEDIATELY on click/tap, preserving the user gesture
-            js_handler = f'''
-                (e) => {{
-                    // iOS Fix: Explicitly cancel and resume to ensure audio context is ready
-                    window.speechSynthesis.cancel();
-                    window.speechSynthesis.resume();
-                    
-                    const utterance = new SpeechSynthesisUtterance("{text}");
-                    utterance.rate = 1.0;
-                    utterance.pitch = 1.0;
-                    utterance.volume = 1.0;
-                    
-                    window.speechSynthesis.speak(utterance);
-                    
-                    // Return true to allow the event to propagate to the server (for logging)
-                    return true; 
-                }}
-            '''
+            if is_sentence_mode["value"]:
+                 # Sentence Mode: Add to queue
+                 def add_to_queue():
+                     sentence_queue.append(item)
+                     # ui.notify(f"Added '{item['label']}'")
+                     refresh_sentence_bar() # Update ONLY sentence bar, not whole grid
+                 
+                 # Queue mode: Add to sentence bar only, do not speak immediately
+                 card.on("click", add_to_queue)
             
-            # Bind click with JS handler for immediate feedback
-            card.on("click", lambda: log_usage(item["id"]), js_handler=js_handler)
-            
-            # Aggressive iOS wakeup on touchstart
-            card.on("touchstart", js_handler='(e) => { window.speechSynthesis.resume(); return true; }', throttle=0.0)
+            else:
+                # Standard Mode: Speak immediately
+                
+                # This JS runs IMMEDIATELY on click/tap, preserving the user gesture
+                js_handler = f'''
+                    (e) => {{
+                        // iOS Fix: Explicitly cancel and resume to ensure audio context is ready
+                        window.speechSynthesis.cancel();
+                        window.speechSynthesis.resume();
+                        
+                        const utterance = new SpeechSynthesisUtterance("{text}");
+                        utterance.rate = 1.0;
+                        utterance.pitch = 1.0;
+                        utterance.volume = 1.0;
+                        
+                        window.speechSynthesis.speak(utterance);
+                        
+                        // Return true to allow the event to propagate to the server (for logging)
+                        return true; 
+                    }}
+                '''
+                
+                # Bind click with JS handler for immediate feedback
+                card.on("click", lambda: log_usage(item["id"]), js_handler=js_handler)
+                
+                # Aggressive iOS wakeup on touchstart
+                card.on("touchstart", js_handler='(e) => { window.speechSynthesis.resume(); return true; }', throttle=0.0)
 
     with card:
         # Image area
@@ -204,7 +228,7 @@ def make_item_button(item, is_trash=False):
                 def toggle_vis(e, i_id=item["id"], c_id=item["cat_id"]):
                     e.stop_propagation()
                     toggle_item_visibility(c_id, i_id)
-                    refresh_ui()
+                    refresh_grid() # Only refresh grid
 
                 vis_icon = "visibility" if is_visible else "visibility_off"
                 # Removed opacity, increased z-index (z-20 parent), ensured white bg
@@ -282,7 +306,7 @@ def open_edit_dialog(item):
                 new_visible=visible_switch.value
             )
             dialog.close()
-            refresh_ui()
+            refresh_grid()
 
         def delete():
             with ui.dialog() as confirm_dialog, ui.card():
@@ -294,7 +318,7 @@ def open_edit_dialog(item):
                         soft_delete_item(item["cat_id"], item["id"])
                         dialog.close()
                         confirm_dialog.close()
-                        refresh_ui()
+                        refresh_grid()
                     ui.button("Delete", color="red", on_click=do_delete)
             confirm_dialog.open()
 
@@ -349,7 +373,7 @@ def open_add_item_dialog(category_id=None):
                     tts_text=tts_input.value
                 )
                 dialog.close()
-                refresh_ui()
+                refresh_grid()
 
         ui.button("Create", on_click=save).classes("w-full mt-4")
 
@@ -363,7 +387,7 @@ def open_add_category_dialog():
         def save():
             if name_input.value:
                 create_category(name_input.value)
-                refresh_ui()
+                refresh_grid()
                 dialog.close()
         
         ui.button("Create", on_click=save).classes("w-full mt-4")
@@ -436,7 +460,7 @@ def restore_from_trash(item):
     if trash_dialog:
         trash_dialog.close()
         open_recycle_bin()
-    refresh_ui()
+    refresh_grid()
 
 def delete_forever(item):
     with ui.dialog() as confirm, ui.card():
@@ -598,115 +622,287 @@ def open_change_pin_dialog():
 
 
 # --------------------------------------------------
+# Sentence Builder Bar
+# --------------------------------------------------
+
+def render_sentence_bar():
+    if not sentence_bar_container:
+        return
+
+    sentence_bar_container.clear()
+    
+    if not is_sentence_mode["value"]:
+        return
+
+    with sentence_bar_container:
+        with ui.card().classes("w-full sticky top-0 z-50 bg-blue-50 border-b-2 border-blue-200 mb-4 p-2 shadow-md"):
+            with ui.row().classes("w-full items-center gap-2"):
+                # Queue Display
+                # Sortable container
+                with ui.row().classes("flex-grow overflow-x-auto gap-2 p-2 bg-white rounded border border-gray-200 min-h-[5rem] items-center flex-nowrap user-select-none") as queue_container:
+                    # Add ID for SortableJS
+                    queue_container.props('id="sortable-queue"')
+                    
+                    if not sentence_queue:
+                        ui.label("Tap items to build a sentence...").classes("text-gray-400 italic ml-2")
+                    
+                    for i, item in enumerate(sentence_queue):
+                         # Small thumbnail version of item
+                         # Use ui.card for better structure, but ui.column is fine. 
+                         # IMPORTANT: data-id is helpful for tracking if we needed it, but using indices is simpler.
+                         with ui.column().classes("w-16 h-20 bg-white border rounded shadow-sm flex-shrink-0 p-1 items-center gap-0 justify-between handle cursor-move"):
+                            # Image path resolution (similar to make_item_button)
+                            img_src = None
+                            if item["image_path"]:
+                                if item["image_path"].startswith("http"):
+                                    img_src = item["image_path"]
+                                elif os.path.isabs(item["image_path"]):
+                                    try:
+                                        # Need a robustway to display, assuming DATA_DIR is available in scope or imports
+                                        rel_path = os.path.relpath(item["image_path"], str(DATA_DIR))
+                                        img_src = f"/data/{rel_path}"
+                                    except ValueError:
+                                        img_src = None
+                            
+                            if img_src:
+                                ui.image(img_src).classes("w-full h-12 object-cover rounded pointer-events-none")
+                            else:
+                                with ui.column().classes("w-full h-12 bg-gray-100 items-center justify-center rounded pointer-events-none"):
+                                    ui.icon("image").classes("text-xs text-gray-300")
+                            
+                            ui.label(item["label"]).classes("text-[10px] leading-tight text-center overflow-hidden w-full text-ellipsis pointer-events-none")
+
+                # Attach SortableJS to the queue_container 
+                def handle_reorder(e):
+                    try:
+                        # Correctly access nested detail
+                        detail = e.args.get('detail', {})
+                        old_idx = detail.get('oldIndex')
+                        new_idx = detail.get('newIndex')
+                        
+                        # Move item in list
+                        if old_idx is not None and new_idx is not None:
+                            if 0 <= old_idx < len(sentence_queue) and 0 <= new_idx < len(sentence_queue):
+                                item = sentence_queue.pop(old_idx)
+                                sentence_queue.insert(new_idx, item)
+                                
+                                # ui.notify(f"Moved '{item['label']}'")
+                                
+                                # Refresh the UI so the Play button gets the new order
+                                refresh_sentence_bar()
+                            else:
+                                print(f"DEBUG: Indices out of bounds: old={old_idx}, new={new_idx}, len={len(sentence_queue)}")
+                        else:
+                            print(f"DEBUG: Invalid event args: {e.args}")
+                            
+                    except Exception as ex:
+                        print(f"Sort error: {ex}")
+                        ui.notify(f"Sort error: {ex}", color="red")
+
+                # Listen for custom sort event
+                queue_container.on('sort_change', handle_reorder)
+                
+                # Initialize Sortable
+                ui.run_javascript('''
+                    var el = document.getElementById('sortable-queue');
+                    if (el) {
+                        new Sortable(el, {
+                            animation: 150,
+                            ghostClass: 'sortable-ghost',
+                            onEnd: function (evt) {
+                                // Emit custom event to NiceGUI
+                                // getElement() helper not strictly needed if we dispatch to the element itself
+                                const event = new CustomEvent('sort_change', {
+                                    detail: { oldIndex: evt.oldIndex, newIndex: evt.newIndex } 
+                                });
+                                // We need to dispatch it on the widget's DOM element that NiceGUI is listening to.
+                                // In NiceGUI 1.0+, the element ID matches the widget ID.
+                                // But here we assigned id="sortable-queue" via props.
+                                // NiceGUI listens to events on the element.
+                                el.dispatchEvent(event);
+                            }
+                        });
+                    }
+                ''')
+
+                # Controls
+                with ui.row().classes("flex-shrink-0 gap-1"):
+                    def backspace():
+                        if sentence_queue:
+                            sentence_queue.pop()
+                            refresh_sentence_bar()
+                    
+                    def clear():
+                        sentence_queue.clear()
+                        refresh_sentence_bar()
+
+                    # Play Logic
+                    # Extract texts
+                    texts = [(item.get("tts_text") or item["label"]).replace('"', '\\"').replace("'", "\\'") for item in sentence_queue]
+                    js_array = "[" + ",".join([f'"{t}"' for t in texts]) + "]"
+                    
+                    play_js = f'''
+                        (e) => {{
+                            const texts = {js_array};
+                            window.speechSynthesis.cancel();
+                            window.speechSynthesis.resume(); // Ensure audio context is awake (iOS)
+                            
+                            let index = 0;
+                            function speakNext() {{
+                                if (index < texts.length) {{
+                                    const u = new SpeechSynthesisUtterance(texts[index]);
+                                    u.rate = 1.3; // Increased speed
+                                    u.pitch = 1.0;
+                                    u.volume = 1.0;
+                                    u.onend = () => {{ index++; speakNext(); }};
+                                    window.speechSynthesis.speak(u);
+                                }}
+                            }}
+                            speakNext();
+                        }}
+                    '''
+                    
+                    ui.button(icon="backspace", on_click=backspace).props("flat dense color=orange").tooltip("Backspace")
+                    ui.button(icon="delete", on_click=clear).props("flat dense color=red").tooltip("Clear All")
+                    ui.button(icon="play_arrow", on_click=None).props("round color=green icon-size=lg").on("click", js_handler=play_js)
+
+
+# --------------------------------------------------
 # Main UI Refresher
 # --------------------------------------------------
 
+def render_grid():
+    if not grid_container:
+        return
+        
+    grid_container.clear()
+    
+    categories = get_categories()
+    
+    with grid_container:
+        # Admin Toolbar (Only if Admin)
+        if is_admin_mode["value"]:
+            with ui.row().classes("w-full bg-gray-100 p-2 rounded shadow-inner mb-4 mt-2 justify-start gap-4"):
+                 ui.button("Add Item", icon="add", on_click=lambda: open_add_item_dialog(None)).classes("bg-blue-600 text-white")
+                 ui.button("Add Category", icon="create_new_folder", on_click=open_add_category_dialog).classes("bg-blue-600 text-white")
+                 ui.button("Change Pin", icon="lock", on_click=open_change_pin_dialog).classes("bg-blue-600 text-white")
+                 ui.space()
+                 ui.button("Recycle Bin", icon="delete", on_click=open_recycle_bin).props("flat color=grey")
+
+        for cat in categories:
+            # Visibility Check (Category)
+            is_cat_visible = cat.get("visible", True)
+            if not is_cat_visible and not is_admin_mode["value"]:
+                continue
+
+            # Category Opacity
+            cat_opacity = "opacity-50" if not is_cat_visible else ""
+        
+            with ui.column().classes(f"w-full mb-8 {cat_opacity}"):
+                # Category Header
+                with ui.row().classes("w-full items-center justify-between mt-4 mb-2 border-b-2 border-blue-100"):
+                    ui.label(cat["name"]).classes("text-xl font-bold text-blue-800")
+                    
+                    if is_admin_mode["value"]:
+                        def toggle_cat_vis(c_id=cat["id"]):
+                            toggle_category_visibility(c_id)
+                            refresh_grid()
+
+                        def rename_cat(c_id=cat["id"], c_name=cat["name"]):
+                            with ui.dialog() as d, ui.card():
+                                ui.label(f"Rename Category '{c_name}'").classes("font-bold text-lg")
+                                new_name_input = ui.input("New Name", value=c_name).classes("w-full")
+                                
+                                def save():
+                                    if new_name_input.value:
+                                        if rename_category(c_id, new_name_input.value):
+                                            ui.notify(f"Renamed to {new_name_input.value}")
+                                            d.close()
+                                            refresh_grid()
+                                        else:
+                                            ui.notify("Error renaming (name exists?)", color="red")
+                                
+                                ui.button("Save", on_click=save).classes("mt-4 w-full")
+                            d.open()
+
+                        def delete_cat(c_id=cat["id"], c_name=cat["name"]):
+                             with ui.dialog() as d, ui.card():
+                                 ui.label(f"Delete Category '{c_name}'?").classes("font-bold text-lg")
+                                 ui.label(" All items in this category will be moved to the Recycle Bin.").classes("text-sm text-gray-600")
+                                 with ui.row().classes("w-full justify-end mt-4 gap-2"):
+                                     ui.button("Cancel", on_click=d.close).props("flat")
+                                     def confirm():
+                                         delete_category(c_id)
+                                         d.close()
+                                         refresh_grid()
+                                         ui.notify(f"Deleted Category: {c_name}")
+                                     ui.button("Delete", color="red", on_click=confirm)
+                             d.open()
+                        
+                        def move_up(c_id=cat["id"]):
+                            if move_category_up(c_id):
+                                ui.notify("Moved up")
+                                refresh_grid()
+                        
+                        def move_down(c_id=cat["id"]):
+                            if move_category_down(c_id):
+                                ui.notify("Moved down")
+                                refresh_grid()
+                        
+                        with ui.row().classes("gap-1"):
+                            ui.button(icon="arrow_upward", on_click=move_up).props("flat dense color=purple round").tooltip("Move Up")
+                            ui.button(icon="arrow_downward", on_click=move_down).props("flat dense color=purple round").tooltip("Move Down")
+                            ui.button(icon="edit", on_click=rename_cat).props("flat dense color=blue round").tooltip("Rename Category")
+                            ui.button(icon="delete", on_click=delete_cat).props("flat dense color=red round").tooltip("Delete Category")
+
+                # Items Row (Flex wrap)
+                items = get_items(cat["id"])
+                
+                # Item Filter
+                visible_items = [i for i in items if i.get("visible", True) or is_admin_mode["value"]]
+
+                with ui.row().classes("w-full flex-wrap gap-2"):
+                    for item in visible_items:
+                        make_item_button(item)
+                    
+                    if not visible_items:
+                        ui.label("No items.").classes("text-gray-400 italic text-sm ml-2")
+        
+
+def refresh_sentence_bar():
+    render_sentence_bar()
+
+def refresh_grid():
+    render_grid()
+
 def refresh_ui():
-    ui.query('.nicegui-content').classes('p-0 gap-0')
     """Build the single-page vertical layout."""
+    global sentence_bar_container, grid_container
+    
     if main_column:
         main_column.clear()
         
-        categories = get_categories()
-
         with main_column.classes("p-0 gap-0")   :
             # Main Header
             with ui.row().classes("w-full items-center justify-between"):
                 ui.label("Dexter Speaks").classes("text-3xl font-extrabold text-blue-900").on('click', refresh_ui)
-                ui.switch(value=is_admin_mode["value"], on_change=toggle_admin).props("color=red")
-            
-            # Admin Toolbar (Only if Admin)
-            if is_admin_mode["value"]:
-                with ui.row().classes("w-full bg-gray-100 p-2 rounded shadow-inner mb-4 mt-2 justify-start gap-4"):
-                     ui.button("Add Item", icon="add", on_click=lambda: open_add_item_dialog(None)).classes("bg-blue-600 text-white")
-                     ui.button("Add Category", icon="create_new_folder", on_click=open_add_category_dialog).classes("bg-blue-600 text-white")
-                     ui.button("Change Pin", icon="lock", on_click=open_change_pin_dialog).classes("bg-blue-600 text-white")
-                     ui.space()
-                     ui.button("Recycle Bin", icon="delete", on_click=open_recycle_bin).props("flat color=grey")
-
-            for cat in categories:
-                # Visibility Check (Category)
-                is_cat_visible = cat.get("visible", True)
-                if not is_cat_visible and not is_admin_mode["value"]:
-                    continue
-
-                # Category Opacity
-                cat_opacity = "opacity-50" if not is_cat_visible else ""
-            
-                with ui.column().classes(f"w-full mb-8 {cat_opacity}"):
-                    # Category Header
-                    with ui.row().classes("w-full items-center justify-between mt-4 mb-2 border-b-2 border-blue-100"):
-                        ui.label(cat["name"]).classes("text-xl font-bold text-blue-800")
-                        
-                        if is_admin_mode["value"]:
-                            def toggle_cat_vis(c_id=cat["id"]):
-                                toggle_category_visibility(c_id)
-                                refresh_ui()
-
-                            def rename_cat(c_id=cat["id"], c_name=cat["name"]):
-                                with ui.dialog() as d, ui.card():
-                                    ui.label(f"Rename Category '{c_name}'").classes("font-bold text-lg")
-                                    new_name_input = ui.input("New Name", value=c_name).classes("w-full")
-                                    
-                                    def save():
-                                        if new_name_input.value:
-                                            if rename_category(c_id, new_name_input.value):
-                                                ui.notify(f"Renamed to {new_name_input.value}")
-                                                d.close()
-                                                refresh_ui()
-                                            else:
-                                                ui.notify("Error renaming (name exists?)", color="red")
-                                    
-                                    ui.button("Save", on_click=save).classes("mt-4 w-full")
-                                d.open()
-
-                            def delete_cat(c_id=cat["id"], c_name=cat["name"]):
-                                 with ui.dialog() as d, ui.card():
-                                     ui.label(f"Delete Category '{c_name}'?").classes("font-bold text-lg")
-                                     ui.label(" All items in this category will be moved to the Recycle Bin.").classes("text-sm text-gray-600")
-                                     with ui.row().classes("w-full justify-end mt-4 gap-2"):
-                                         ui.button("Cancel", on_click=d.close).props("flat")
-                                         def confirm():
-                                             delete_category(c_id)
-                                             d.close()
-                                             refresh_ui()
-                                             ui.notify(f"Deleted Category: {c_name}")
-                                         ui.button("Delete", color="red", on_click=confirm)
-                                 d.open()
-                            
-                            def move_up(c_id=cat["id"]):
-                                if move_category_up(c_id):
-                                    ui.notify("Moved up")
-                                    refresh_ui()
-                            
-                            def move_down(c_id=cat["id"]):
-                                if move_category_down(c_id):
-                                    ui.notify("Moved down")
-                                    refresh_ui()
-                            
-                            with ui.row().classes("gap-1"):
-                                ui.button(icon="arrow_upward", on_click=move_up).props("flat dense color=purple round").tooltip("Move Up")
-                                ui.button(icon="arrow_downward", on_click=move_down).props("flat dense color=purple round").tooltip("Move Down")
-                                ui.button(icon="add", on_click=lambda c_id=cat["id"]: open_add_item_dialog(c_id)).props("flat dense color=green round").tooltip("Add Item to Category")
-                                vis_icon = "visibility" if is_cat_visible else "visibility_off"
-                                ui.button(icon=vis_icon, on_click=toggle_cat_vis).props(f"flat dense color={'gray' if is_cat_visible else 'red'} round").tooltip("Toggle Visibility")
-                                ui.button(icon="edit", on_click=rename_cat).props("flat dense color=blue round").tooltip("Rename Category")
-                                ui.button(icon="delete", on_click=delete_cat).props("flat dense color=red round").tooltip("Delete Category")
-
-                    # Items Row (Flex wrap)
-                    items = get_items(cat["id"])
+                with ui.row().classes("items-center gap-2"):
+                    # Sentence Mode Toggle
+                    def toggle_sm(e):
+                        is_sentence_mode["value"] = e.value
+                        refresh_ui()
+                    ui.switch(text="Build", value=is_sentence_mode["value"], on_change=toggle_sm).props("color=green icon=record_voice_over")
                     
-                    # Item Filter
-                    visible_items = [i for i in items if i.get("visible", True) or is_admin_mode["value"]]
-
-                    with ui.row().classes("w-full flex-wrap gap-2"):
-                        for item in visible_items:
-                            make_item_button(item)
-                        
-                        if not visible_items:
-                            ui.label("No items.").classes("text-gray-400 italic text-sm ml-2")
+                    # Admin Toggle
+                    ui.switch(value=is_admin_mode["value"], on_change=toggle_admin).props("color=red icon=settings").tooltip("Admin Mode")
             
-            # Removed global Add Category button at bottom
+            # Sentence Bar
+            sentence_bar_container = ui.column().classes("w-full sticky top-0 z-50 p-0")
+            render_sentence_bar()
+            
+            # Main Grid
+            grid_container = ui.column().classes("w-full p-0 gap-0")
+            render_grid()
 
 def toggle_admin(e):
     if is_admin_mode.get("locking", False):
