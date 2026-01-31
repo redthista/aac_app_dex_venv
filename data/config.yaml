@@ -1,0 +1,29 @@
+pin: '0000'
+categories:
+  Activities:
+    visible: true
+    order: 3
+  Feelings:
+    visible: true
+    order: 0
+  Food:
+    visible: true
+    order: 1
+  Go:
+    visible: true
+    order: 4
+  Holiday:
+    visible: true
+    order: 5
+  People:
+    visible: true
+    order: 2
+  Things:
+    visible: true
+    order: 7
+  Toys:
+    visible: true
+    order: 8
+  TV:
+    visible: true
+    order: 6

@@ -1,0 +1,14 @@
+version: '3.8'
+
+services:
+  aac-app:
+    build: .
+    container_name: dexter-speaks
+    ports:
+      - "8085:8085"
+    volumes:
+      # Mount Unraid appdata folder
+      - /mnt/user/appdata/aac_app_dex:/app/data
+    restart: unless-stopped
+    environment:
+      - AAC_DATA_DIR=/app/data
