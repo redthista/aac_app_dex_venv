@@ -612,7 +612,7 @@ def refresh_ui():
         with main_column.classes("p-0 gap-0")   :
             # Main Header
             with ui.row().classes("w-full items-center justify-between"):
-                ui.label("Dexter Speaks").classes("text-3xl font-extrabold text-blue-900")
+                ui.label("Dexter Speaks").classes("text-3xl font-extrabold text-blue-900").on('click', refresh_ui)
                 ui.switch(value=is_admin_mode["value"], on_change=toggle_admin).props("color=red")
             
             # Admin Toolbar (Only if Admin)
