@@ -28,12 +28,17 @@ from data_manager import (
     move_category_down,
     read_config,
     write_config,
+    search_opensymbols,
+    download_image_from_url,
+    update_secret,
+    test_secret,
     DATA_DIR
 )
 import os
 import base64
 import random
 import yaml
+import asyncio
 
 # Serve the data directory for images
 app.add_static_files('/data', str(DATA_DIR))
@@ -137,7 +142,7 @@ def make_item_button(item, is_trash=False):
 
     is_visible = item.get("visible", True)
     # Added flex flex-col so flex-grow works, and item-card class for iOS touch support
-    base_classes = "item-card w-32 h-40 m-2 p-0 gap-0 flex flex-col items-center hover:scale-105 transition-transform cursor-pointer shadow-md relative"
+    base_classes = "item-card w-32 h-40 m-0 p-0 gap-0 flex flex-col items-center hover:scale-105 transition-transform cursor-pointer shadow-md relative"
     if not is_visible:
         base_classes += " opacity-50 grayscale border-2 border-dashed"
         
@@ -267,6 +272,79 @@ def handle_image_data(content, file_container):
     else:
         ui.notify("Error: Unsupported content type", color="red")
 
+# --------------------------------------------------
+# Symbol Search Dialog
+# --------------------------------------------------
+
+def open_symbol_search_dialog(on_select):
+    """
+    Opens a dialog to search for symbols.
+    on_select: callback function(image_url, label)
+    """
+    with ui.dialog() as dialog, ui.card().classes("w-full max-w-4xl h-3/4"):
+        ui.label("Search OpenSymbols").classes("text-xl font-bold")
+        
+        with ui.row().classes("w-full gap-2"):
+            search_input = ui.input("Search query").classes("flex-grow")
+            
+            # Results container
+            results_container = ui.row().classes("w-full flex-wrap gap-2 overflow-y-auto p-2 border bg-gray-50 rounded h-full")
+
+            async def do_search():
+                query = search_input.value
+                if not query:
+                    ui.notify("Please enter a search term.")
+                    return
+                
+                results_container.clear()
+                with results_container:
+                     ui.spinner("dots").classes("mx-auto")
+                
+                # Run sync search in executor to avoid blocking UI
+                # nicegui's run.io_bound is perfect here
+                async def run_search():
+                    try:
+                        loop = asyncio.get_running_loop()
+                        results = await loop.run_in_executor(None, search_opensymbols, query)
+                        results_container.clear()
+                        
+                        if not results:
+                            with results_container:
+                                 ui.label("No results found.").classes("text-gray-500 italic")
+                            return
+
+                        with results_container:
+                            for item in results:
+                                # Only show items with valid keys/images
+                                if "image_url" not in item:
+                                    continue
+                                    
+                                img_url = item["image_url"]
+                                label = item.get("name", "Unknown")
+                                
+                                def make_select_handler(url, lbl):
+                                    return lambda: [on_select(url, lbl), dialog.close()]
+
+                                with ui.card().classes("w-32 h-40 p-1 flex flex-col items-center hover:bg-blue-50 cursor-pointer").on("click", make_select_handler(img_url, label)):
+                                    ui.image(img_url).classes("w-full h-24 object-contain")
+                                    ui.label(label).classes("text-xs text-center overflow-hidden w-full text-ellipsis mt-1")
+                    except Exception as e:
+                        results_container.clear()
+                        with results_container:
+                            ui.label(f"Search failed: {str(e)}").classes("text-red-500 font-bold")
+                            ui.label("Check logs or config.").classes("text-gray-500 text-xs")
+                
+                # Run async wrapper
+                await run_search()
+
+            ui.button("Search", on_click=do_search, icon="search")
+            search_input.on('keydown.enter', do_search)
+
+        with ui.row().classes("w-full justify-end mt-4"):
+             ui.button("Close", on_click=dialog.close).props("flat")
+
+    dialog.open()
+
 
 def open_edit_dialog(item):
     """Edit existing item."""
@@ -287,12 +365,31 @@ def open_edit_dialog(item):
         # Visibility Toggle
         visible_switch = ui.switch("Visible", value=item.get("visible", True)).classes("w-full mt-2")
 
+        ui.button("Search OpenSymbols", icon="search", on_click=lambda: open_symbol_search_dialog(handle_symbol_select)).props("flat dense color=blue").classes("w-full mt-1")
+
         ui.label("Update Image:").classes("text-sm font-bold mt-2")
         
+
+
         uploaded_file = {"data": None}
         
         # Fallback Upload
         ui.upload(on_upload=lambda e: handle_file_upload(e, uploaded_file), auto_upload=True).props("accept=image/* flat dense").classes("w-full mt-1")
+
+        # Symbol Search Integration
+        def handle_symbol_select(url, label):
+             ui.notify(f"Selected: {label}")
+             # Download immediately
+             # Note: This blocks main thread briefly, but usually fast. 
+             # Could be async but keep simple for now.
+             data = download_image_from_url(url)
+             if data:
+                 uploaded_file["data"] = data
+                 ui.notify("Image downloaded!")
+             else:
+                 ui.notify("Failed to download image.", color="red")
+
+        ui.button("Search OpenSymbols", icon="search", on_click=lambda: open_symbol_search_dialog(handle_symbol_select)).props("flat dense color=blue").classes("w-full mt-1")
 
         def save():
             ui.notify("Updating...")
@@ -354,10 +451,26 @@ def open_add_item_dialog(category_id=None):
         tts_input = ui.input("TTS Text (Optional)").classes("w-full")
         
         ui.label("Image:").classes("text-sm font-bold mt-2")
-        
+        ui.button("Search OpenSymbols", icon="search", on_click=lambda: open_symbol_search_dialog(handle_symbol_select)).props("flat dense color=blue").classes("w-full mt-1")
+
         uploaded_file = {"data": None}
         
         ui.upload(on_upload=lambda e: handle_file_upload(e, uploaded_file), auto_upload=True).props("accept=image/* flat dense").classes("w-full mt-1")
+
+        # Symbol Search Integration
+        def handle_symbol_select(url, label):
+             # Auto-fill label if empty
+             if not name_input.value:
+                 name_input.value = label
+                 
+             # Download
+             data = download_image_from_url(url)
+             if data:
+                 uploaded_file["data"] = data
+                 ui.notify("Image downloaded & set!")
+             else:
+                 ui.notify("Failed to download image.", color="red")
+
 
         def save():
             if not cat_select.value:
@@ -620,6 +733,62 @@ def open_change_pin_dialog():
 
     dialog.open()
 
+def open_secret_dialog():
+    """Dialog to update OpenSymbols API Secret."""
+    
+    # Get current secret (masked)
+    config = read_config()
+    current_secret = config.get("opensymbols_secret", "")
+    masked = current_secret[:6] + "..." + current_secret[-4:] if current_secret and len(current_secret) > 10 else "Not Set"
+
+    with ui.dialog() as dialog, ui.card().classes("z-10 w-96 p-8 shadow-2xl rounded-xl bg-white/95 items-center gap-4"):
+        ui.label("OpenSymbols API Secret").classes("text-xl font-bold text-blue-900")
+        ui.link("Get Secret Here", "https://www.opensymbols.org/api#secret", new_tab=True).classes("text-sm text-blue-500 underline mb-2")
+        ui.label(f"Current: {masked}").classes("text-xs text-gray-500 mb-2")
+        
+        secret_input = ui.input("New Secret").classes("w-full").props("outlined placeholder='Paste new secret here' clearable")
+        
+        def save():
+            if secret_input.value:
+                update_secret(secret_input.value.strip())
+                ui.notify("Secret updated! Token cache cleared.", color="green")
+                dialog.close()
+            else:
+                ui.notify("Please enter a valid secret", color="orange")
+
+        test_btn = None
+        
+        def test():
+            if not test_btn: return
+            
+            # Reset
+            test_btn.props("icon=hourglass_empty color=grey")
+            
+            # Test entered value OR current config value if empty
+            val_to_test = secret_input.value.strip() if secret_input.value else current_secret
+            
+            if not val_to_test:
+                ui.notify("No secret to test!", color="orange")
+                test_btn.props("icon=help color=grey")
+                return
+                
+            ui.notify("Testing...", color="blue")
+            success, msg = test_secret(val_to_test)
+            
+            if success:
+                ui.notify(msg, color="green")
+                test_btn.props("icon=check color=green")
+            else:
+                ui.notify(msg, color="red", multi_line=True, timeout=5000)
+                test_btn.props("icon=close color=red")
+
+        with ui.row().classes("w-full justify-end gap-2 mt-4"):
+             test_btn = ui.button("Test", on_click=test).props("flat color=grey icon=help")
+             ui.button("Cancel", on_click=dialog.close).props("flat")
+             ui.button("Save", on_click=save).classes("bg-blue-600 text-white")
+
+    dialog.open()
+
 
 # --------------------------------------------------
 # Sentence Builder Bar
@@ -786,6 +955,7 @@ def render_grid():
                  ui.button("Add Item", icon="add", on_click=lambda: open_add_item_dialog(None)).classes("bg-blue-600 text-white")
                  ui.button("Add Category", icon="create_new_folder", on_click=open_add_category_dialog).classes("bg-blue-600 text-white")
                  ui.button("Change Pin", icon="lock", on_click=open_change_pin_dialog).classes("bg-blue-600 text-white")
+                 ui.button("API Key", icon="key", on_click=open_secret_dialog).classes("bg-blue-600 text-white")
                  ui.space()
                  ui.button("Recycle Bin", icon="delete", on_click=open_recycle_bin).props("flat color=grey")
 
@@ -798,7 +968,7 @@ def render_grid():
             # Category Opacity
             cat_opacity = "opacity-50" if not is_cat_visible else ""
         
-            with ui.column().classes(f"w-full mb-8 {cat_opacity}"):
+            with ui.column().classes(f"w-full mb-8 gap-0 {cat_opacity}"):
                 # Category Header
                 with ui.row().classes("w-full items-center justify-between mt-4 mb-2 border-b-2 border-blue-100"):
                     ui.label(cat["name"]).classes("text-xl font-bold text-blue-800")
@@ -829,7 +999,7 @@ def render_grid():
                              with ui.dialog() as d, ui.card():
                                  ui.label(f"Delete Category '{c_name}'?").classes("font-bold text-lg")
                                  ui.label(" All items in this category will be moved to the Recycle Bin.").classes("text-sm text-gray-600")
-                                 with ui.row().classes("w-full justify-end mt-4 gap-2"):
+                                 with ui.row().classes("w-full justify-end mt-4 gap-1"):
                                      ui.button("Cancel", on_click=d.close).props("flat")
                                      def confirm():
                                          delete_category(c_id)
@@ -861,7 +1031,7 @@ def render_grid():
                 # Item Filter
                 visible_items = [i for i in items if i.get("visible", True) or is_admin_mode["value"]]
 
-                with ui.row().classes("w-full flex-wrap gap-2"):
+                with ui.row().classes("w-full flex-wrap gap-0"):
                     for item in visible_items:
                         make_item_button(item)
                     
@@ -879,14 +1049,17 @@ def refresh_ui():
     """Build the single-page vertical layout."""
     global sentence_bar_container, grid_container
     
+    ui.query('.nicegui-content').classes('p-0 gap-0')
+        # 1. Clear the main container
     if main_column:
         main_column.clear()
         
+        # 2. Rebuild the layout
         with main_column.classes("p-0 gap-0")   :
             # Main Header
-            with ui.row().classes("w-full items-center justify-between"):
+            with ui.row().classes("w-full items-center justify-between gap-0"):
                 ui.label("Dexter Speaks").classes("text-3xl font-extrabold text-blue-900").on('click', refresh_ui)
-                with ui.row().classes("items-center gap-2"):
+                with ui.row().classes("items-center gap-0"):
                     # Sentence Mode Toggle
                     def toggle_sm(e):
                         is_sentence_mode["value"] = e.value

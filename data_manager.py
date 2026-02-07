@@ -6,6 +6,111 @@ from datetime import datetime
 from PIL import Image
 import io
 import uuid
+import requests
+import time
+
+# Load secret from config (will be lazy loaded or read at Module level if config exists)
+# Better: Just read it when needed or initialize it.
+# Let's initialize it at module level for simplicity, but via read_config
+# We need to make sure read_config is available or safe to call.
+# It is defined below. Let's move read_config up or just use a helper here.
+# Actually, let's just use empty string and let get_opensymbols_token read it.
+# But wait, read_config is used by others.
+# Let's just define a helper or move read_config up.
+# Simplest: Just use None here and load in get_opensymbols_token
+OPENSYMBOLS_SECRET = None
+_opensymbols_token_cache = {"token": None, "expires_at": 0}
+
+def get_opensymbols_token():
+    """
+    Get valid access token, refreshing if necessary.
+    """
+    global _opensymbols_token_cache
+    
+    # Check cache (expire 5 mins early to be safe)
+    if _opensymbols_token_cache["token"] and time.time() < _opensymbols_token_cache["expires_at"] - 300:
+        return _opensymbols_token_cache["token"]
+        
+    # Load secret from config if not set
+    secret = OPENSYMBOLS_SECRET
+    if not secret:
+        config = read_config()
+        secret = config.get("opensymbols_secret")
+        
+    if not secret:
+        print("OpenSymbols secret not found in config.")
+        return None
+
+    try:
+        url = "https://www.opensymbols.org/api/v2/token"
+        response = requests.post(url, params={"secret": secret}, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        
+        token = data.get("access_token")
+        if token:
+            _opensymbols_token_cache = {
+                "token": token,
+                # Assume 1 hour expiration if not provided, or check docs. 
+                # Docs say "short-lived". Let's assume 30 mins to be safe? 
+                # Actually, let's just use it until it breaks (401) then refresh.
+                # But for this simple cache, let's set a timestamp.
+                "expires_at": time.time() + 3600 
+            }
+            return token
+    except Exception as e:
+        print(f"Error getting OpenSymbols token: {e}")
+        
+    return None
+
+def search_opensymbols(query):
+    """
+    Search OpenSymbols API.
+    """
+    token = get_opensymbols_token()
+    if not token:
+        raise Exception("Could not obtain access token. Check your secret in data/config.yaml")
+        
+    url = "https://www.opensymbols.org/api/v2/symbols"
+    headers = {"Authorization": f"Bearer {token}"}
+    params = {"q": query, "safe": 1}
+    
+    try:
+        response = requests.get(url, headers=headers, params=params, timeout=10)
+        
+        if response.status_code == 401:
+            try:
+                error_data = response.json()
+                if error_data.get("token_expired") or error_data.get("invalid_token"):
+                    # Token expired, clear cache and retry once
+                    _opensymbols_token_cache["token"] = None
+                    token = get_opensymbols_token()
+                    if token:
+                        headers = {"Authorization": f"Bearer {token}"}
+                        response = requests.get(url, headers=headers, params=params, timeout=10)
+            except ValueError:
+                pass # Not JSON, standard 401 handling or ignore
+        
+        if response.status_code == 200:
+            return response.json()
+        else:
+            raise Exception(f"API Error: {response.status_code} - {response.text[:100]}")
+            
+    except Exception as e:
+        print(f"Error searching OpenSymbols: {e}")
+        raise e
+
+def download_image_from_url(url):
+    """
+    Download image from URL and return bytes.
+    """
+    try:
+        response = requests.get(url, timeout=15)
+        response.raise_for_status()
+        return response.content
+    except Exception as e:
+        print(f"Error downloading image {url}: {e}")
+        return None
 
 # ==================================================
 # Configuration
@@ -368,7 +473,14 @@ def create_item(category_id, label, image_file=None, image_url=None, tts_text=No
         dest_path = cat_path / file_stem 
         saved_name = process_and_save_image(image_file, dest_path)
     elif image_url:
-        data["image_path"] = image_url
+        # Download and save
+        img_data = download_image_from_url(image_url)
+        if img_data:
+             dest_path = cat_path / file_stem 
+             saved_name = process_and_save_image(img_data, dest_path)
+        else:
+             # Fallback to hotlink if download fails (optional, or just fail)
+             data["image_path"] = image_url
 
     with open(yaml_path, "w", encoding="utf-8") as f:
         yaml.dump(data, f)
@@ -411,7 +523,23 @@ def update_item(category_id, item_id, **kwargs):
             del data["image_path"]
 
     elif "new_image_url" in kwargs and kwargs["new_image_url"]:
-         data["image_path"] = kwargs["new_image_url"]
+          # Download and save replacement
+          new_url = kwargs["new_image_url"]
+          img_data = download_image_from_url(new_url)
+          
+          if img_data:
+                # Delete old
+                for ext in [".png", ".jpg", ".jpeg", ".gif", ".webp"]:
+                    old_img = cat_path / f"{item_id}{ext}"
+                    if old_img.exists():
+                        os.remove(old_img)
+                        
+                dest_path = cat_path / item_id
+                saved_filename = process_and_save_image(img_data, dest_path)
+                if saved_filename and "image_path" in data:
+                    del data["image_path"]
+          else:
+               data["image_path"] = new_url
 
     with open(yaml_path, "w", encoding="utf-8") as f:
         yaml.dump(data, f)
@@ -552,3 +680,30 @@ def log_usage(item_id):
     ensure_data_dir()
     with open(LOG_FILE, "a", encoding="utf-8") as f:
         f.write(f"{datetime.now().isoformat()},{item_id}\n")
+
+def update_secret(new_secret):
+    """Update OpenSymbols secret in config and clear cache."""
+    ensure_data_dir()
+    config = read_config()
+    config["opensymbols_secret"] = new_secret
+    write_config(config)
+    
+    # Update global and clear cache
+    global OPENSYMBOLS_SECRET, _opensymbols_token_cache
+    OPENSYMBOLS_SECRET = new_secret
+    _opensymbols_token_cache = {"token": None, "expires_at": 0}
+    
+    return True
+
+def test_secret(secret):
+    """Test if a secret key is valid by attempting to get a token."""
+    try:
+        url = "https://www.opensymbols.org/api/v2/token"
+        response = requests.post(url, params={"secret": secret}, timeout=5)
+        response.raise_for_status()
+        data = response.json()
+        if "access_token" in data:
+            return True, "Success! Token received."
+        return False, "No access token in response."
+    except Exception as e:
+        return False, f"Error: {e}"

@@ -1,4 +1,5 @@
 pin: '0000'
+opensymbols_secret: b10c7b95f0ee0a8102d98f90
 categories:
   Activities:
     visible: true
