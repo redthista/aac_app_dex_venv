@@ -43,9 +43,11 @@ import asyncio
 # Serve the data directory for images
 app.add_static_files('/data', str(DATA_DIR))
 
-# Disable pinch-to-zoom on mobile devices (Meta tag + JS listeners for iOS 10+)
-ui.add_head_html('<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">')
-ui.add_head_html('''
+
+def setup_header():
+    # Disable pinch-to-zoom on mobile devices (Meta tag + JS listeners for iOS 10+)
+    ui.add_head_html('<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">')
+    ui.add_head_html('''
 <script>
     // Aggressively prevent pinch-zoom events (iOS ignores user-scalable=no)
     document.addEventListener('gesturestart', function(e) { e.preventDefault(); });
@@ -55,8 +57,8 @@ ui.add_head_html('''
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Sortable/1.15.0/Sortable.min.js"></script>
 ''')
 
-# Add iOS-specific CSS for touch interactions
-ui.add_head_html('''
+    # Add iOS-specific CSS for touch interactions
+    ui.add_head_html('''
 <style>
     /* Enable touch interactions on iOS */
     .item-card {
@@ -93,8 +95,8 @@ ui.add_head_html('''
 </style>
 ''')
 
-# Initialize speech synthesis for iOS (requires user interaction to unlock)
-ui.add_head_html('''
+    # Initialize speech synthesis for iOS (requires user interaction to unlock)
+    ui.add_head_html('''
 <script>
     // iOS Safari requires an initial user interaction to enable speech synthesis
     // This script initializes it on first touch/click
@@ -126,27 +128,32 @@ ui.add_head_html('''
 is_admin_mode = {"value": False}
 is_sentence_mode = {"value": False}
 sentence_queue = []
-main_column = None
+sentence_queue = []
+main_column = None # Global placeholder
 sentence_bar_container = None
 grid_container = None
 
-# Remove default padding and gap
-ui.query('nicegui-content').classes('gap-0 p-0')
+# Remove default padding and gap - moved to index_page
+# ui.query('nicegui-content').classes('gap-0 p-0')
 
 # --------------------------------------------------
 # UI Component: Item Button
 # --------------------------------------------------
 
-def make_item_button(item, is_trash=False):
+def make_item_button(item, is_trash=False, size_px=128):
     """Create clickable item button with image support."""
 
     is_visible = item.get("visible", True)
     # Added flex flex-col so flex-grow works, and item-card class for iOS touch support
-    base_classes = "item-card w-32 h-40 m-0 p-0 gap-0 flex flex-col items-center hover:scale-105 transition-transform cursor-pointer shadow-md relative"
+    # Removed w-32 h-40 to allow dynamic sizing via style
+    base_classes = "item-card m-0 p-0 gap-0 flex flex-col items-center hover:scale-105 transition-transform cursor-pointer shadow-md relative"
     if not is_visible:
         base_classes += " opacity-50 grayscale border-2 border-dashed"
         
-    card = ui.card().classes(base_classes)
+    # Calculate height based on 1.25 aspect ratio (approx w-32 h-40)
+    height_px = size_px * 1.25
+    
+    card = ui.card().classes(base_classes).style(f"width: {size_px}px; height: {height_px}px")
     
     if is_trash:
         card.classes(remove="hover:scale-105 cursor-pointer item-card") # Disable hover/click effects
@@ -1039,6 +1046,131 @@ def render_grid():
                         ui.label("No items.").classes("text-gray-400 italic text-sm ml-2")
         
 
+
+@ui.page('/grid')
+def grid_view_page():
+    # call common header
+    setup_header()
+    
+    # State for expanded categories
+    # using a set to track which category IDs are expanded
+    expanded_categories = set()
+
+
+    # 1. Header with Controls
+    with ui.row().classes("w-full items-center justify-between p-4 bg-gray-100 shadow-md sticky top-0 z-50"):
+        # Back button - Standard click handler (works on PC/Android)
+        ui.button(icon="arrow_back", on_click=lambda: ui.navigate.to('/')).props("flat round big")
+        
+        with ui.row().classes("items-center gap-4"):
+            # Expand/Collapse All Buttons
+            def expand_all():
+                all_cats = get_categories()
+                for cat in all_cats:
+                    expanded_categories.add(cat["id"])
+                render_all(slider.value)
+
+            def collapse_all():
+                expanded_categories.clear()
+                render_all(slider.value)
+
+            ui.button("Expand All", on_click=expand_all).props("outline sm")
+            ui.button("Collapse All", on_click=collapse_all).props("outline sm")
+
+            ui.label("Zoom")
+            # Default 128 (w-32)
+            slider = ui.slider(min=60, max=300, value=80, step=10).classes("w-64")
+    
+    # 2. Grid Container
+    # Use standard div with flex wrap
+    grid_container = ui.element('div').classes("w-full flex flex-wrap gap-4 p-4 justify-start content-start")
+    
+    def toggle_category(cat_id):
+        if cat_id in expanded_categories:
+            expanded_categories.remove(cat_id)
+        else:
+            expanded_categories.add(cat_id)
+        render_all(slider.value)
+
+    def make_category_button(category, size_px):
+        """Create a category card that toggles expansion."""
+        cat_id = category["id"]
+        is_expanded = cat_id in expanded_categories
+        
+        # Calculate dimensions (approx same ratio as items or square?)
+        # Let's make it look like a folder or distinct card
+        height_px = size_px * 1.25
+        
+        # Style
+        bg_color = "bg-blue-100" if is_expanded else "bg-blue-50"
+        border = "border-2 border-blue-400" if is_expanded else "border border-blue-200"
+        
+        card = ui.card().classes(f"{bg_color} {border} hover:bg-blue-200 cursor-pointer flex flex-col items-center justify-center relative shadow-sm transition-all item-card p-1")
+        card.style(f"width: {size_px}px; height: {height_px}px")
+        
+        # Scaling calculations
+        icon_size = max(20, int(size_px * 0.5)) # 50% of width
+        font_size = max(10, int(size_px * 0.12)) # 12% of width
+        
+        with card:
+            # Folder Icon
+            icon_name = "folder_open" if is_expanded else "folder"
+            ui.icon(icon_name).classes("text-blue-500 mb-2").style(f"font-size: {icon_size}px")
+            
+            # Label
+            ui.label(category["name"]).classes("font-bold text-blue-900 text-center leading-tight w-full overflow-hidden text-ellipsis whitespace-nowrap block").style(f"font-size: {font_size}px")
+            
+            # Count hint?
+            # items_count = len(get_items(cat_id)) # Might be expensive to do every render if many cats
+            # ui.label(f"{items_count} items").classes("text-xs text-blue-400")
+            
+            # Expand/Collapse Indicator
+            indicator = "expand_less" if is_expanded else "expand_more"
+            # Scale indicator too, slightly smaller
+            indicator_size = max(12, int(size_px * 0.15))
+            ui.icon(indicator).classes("absolute bottom-2 right-2 text-blue-400").style(f"font-size: {indicator_size}px")
+
+        # Standard click handler - works on PC/Android
+        card.on("click", lambda: toggle_category(cat_id))
+
+    def render_all(size):
+        grid_container.clear()
+        
+        # Gather data
+        categories = get_categories()
+        
+        with grid_container:
+            for cat in categories:
+                # Visibility check
+                if not cat.get("visible", True) and not is_admin_mode["value"]:
+                    continue
+                
+                # Render Category Card
+                make_category_button(cat, size)
+                
+                # If expanded, render items immediately after
+                if cat["id"] in expanded_categories:
+                    items = get_items(cat["id"])
+                    
+                    # Wrap items in a visual group? Or just inline?
+                    # Request was "click them they add the cards within into the grid"
+                    # User also said "click the category to 'hide' the ones held within"
+                    # Inline seems best for "into the grid".
+                    
+                    # Optional: Visual separator or background for the group?
+                    # For now, just render them.
+                    
+                    visible_items = [i for i in items if i.get("visible", True) or is_admin_mode["value"]]
+                    
+                    for item in visible_items:
+                        make_item_button(item, size_px=size)
+                
+    # Initial Render
+    render_all(slider.value)
+    
+    # Bind slider with throttle
+    slider.on('update:model-value', lambda e: render_all(e.args), throttle=0.1)
+
 def refresh_sentence_bar():
     render_sentence_bar()
 
@@ -1060,6 +1192,9 @@ def refresh_ui():
             with ui.row().classes("w-full items-center justify-between gap-0"):
                 ui.label("Dexter Speaks").classes("text-3xl font-extrabold text-blue-900").on('click', refresh_ui)
                 with ui.row().classes("items-center gap-0"):
+                    # Navigation to Grid View
+                    ui.button(icon="grid_view", on_click=lambda: ui.navigate.to('/grid')).props("flat round color=blue").tooltip("Grid View")
+
                     # Sentence Mode Toggle
                     def toggle_sm(e):
                         is_sentence_mode["value"] = e.value
@@ -1107,8 +1242,18 @@ def toggle_admin(e):
 # Layout Setup
 # --------------------------------------------------
 
-with ui.column().classes("w-full max-w-screen-xl mx-auto p-4") as main_column:
-    pass 
+@ui.page('/')
+def index_page():
+    global main_column
+    
+    setup_header()
+    
+    # Ensure styles
+    ui.query('.nicegui-content').classes('p-0 gap-0') 
+    
+    with ui.column().classes("w-full max-w-screen-xl mx-auto p-4") as col:
+        main_column = col
+        refresh_ui()
 
-refresh_ui()
-ui.run(title="Dxtr AAC", favicon="🗣️", port=8085)
+if __name__ in {"__main__", "__mp_main__"}:
+    ui.run(title="Dxtr AAC", favicon="🗣️", port=8085)
