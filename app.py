@@ -6,6 +6,7 @@ Refactored to use data_manager.py (YAML/Folder) storage and Admin Mode.
 Enhanced with Image Upload/Paste support and Recycle Bin.
 """
 
+
 from nicegui import ui, app
 from data_manager import (
     get_categories,
