@@ -43,6 +43,7 @@ import asyncio
 # Serve the data directory for images
 app.add_static_files('/data', str(DATA_DIR))
 
+print('test')
 
 def setup_header():
     # Disable pinch-to-zoom on mobile devices (Meta tag + JS listeners for iOS 10+)
