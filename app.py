@@ -1256,4 +1256,4 @@ def index_page():
         refresh_ui()
 
 if __name__ in {"__main__", "__mp_main__"}:
-    ui.run(title="Dxtr AAC", favicon="🗣️", port=8085)
+    ui.run(host='0.0.0.0', port=8085, title="Dxtr AAC", favicon="🗣️")
