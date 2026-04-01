@@ -1239,10 +1239,10 @@ def grid_view_page():
                                 refresh_page()
                             open_pin_dialog(on_success)
                     if is_admin_mode["value"]:
-                        ui.button("Admin", icon="settings", on_click=click_admin) \
+                        ui.button("", icon="settings", on_click=click_admin) \
                             .props("unelevated size=lg color=red")
                     else:
-                        ui.button("Admin", icon="settings", on_click=click_admin) \
+                        ui.button("", icon="settings", on_click=click_admin) \
                             .props("outline size=lg color=grey")
 
             # Sentence bar (shared global)
