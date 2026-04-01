@@ -1,5 +1,6 @@
 import os
 import shutil
+import subprocess
 import yaml
 from pathlib import Path
 from datetime import datetime
@@ -158,33 +159,53 @@ def safe_filename(name):
     """Make a string safe for filesystem."""
     return "".join(c for c in name if c.isalnum() or c in (' ', '-', '_')).strip()
 
+def _try_convert_svg(image_data: bytes) -> bytes | None:
+    """Try to convert SVG bytes to PNG using rsvg-convert."""
+    try:
+        result = subprocess.run(
+            ["rsvg-convert", "--format", "png", "-"],
+            input=image_data,
+            capture_output=True,
+            timeout=10
+        )
+        if result.returncode == 0 and result.stdout:
+            return result.stdout
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    return None
+
+
 def process_and_save_image(image_data: bytes, dest_path: Path):
     """
     Resize and save image data to destination.
-    Converts to efficient format (WebP or JPEG).
+    Converts to JPEG or PNG. SVG is converted via rsvg-convert.
     """
     try:
         img = Image.open(io.BytesIO(image_data))
-        
-        # Resize if too big
-        img.thumbnail(MAX_IMAGE_SIZE, Image.Resampling.LANCZOS)
-        
-        if img.mode == 'RGBA':
-            # Save as PNG to keep transparency
-            dest_path = dest_path.with_suffix('.png')
-            img.save(dest_path, format="PNG", optimize=True)
-        else:
-            # Save as JPEG
-            dest_path = dest_path.with_suffix('.jpg')
-            img = img.convert('RGB')
-            img.save(dest_path, format="JPEG", quality=85)
-            
-        return dest_path.name
-    except Exception as e:
-        print(f"Image processing error: {e}")
-        import traceback
-        traceback.print_exc()
-        return None
+    except Exception:
+        # PIL couldn't open it — try SVG conversion
+        png_bytes = _try_convert_svg(image_data)
+        if not png_bytes:
+            print("Image processing failed: unsupported format and SVG conversion unavailable.")
+            return None
+        try:
+            img = Image.open(io.BytesIO(png_bytes))
+        except Exception as e:
+            print(f"Image processing failed after SVG conversion: {e}")
+            return None
+
+    # Resize if too big
+    img.thumbnail(MAX_IMAGE_SIZE, Image.Resampling.LANCZOS)
+
+    if img.mode == 'RGBA':
+        dest_path = dest_path.with_suffix('.png')
+        img.save(dest_path, format="PNG", optimize=True)
+    else:
+        dest_path = dest_path.with_suffix('.jpg')
+        img = img.convert('RGB')
+        img.save(dest_path, format="JPEG", quality=85)
+
+    return dest_path.name
 
 # ==================================================
 # Category Operations
@@ -211,7 +232,8 @@ def get_categories():
                     "id": cat_id,
                     "name": cat_id,
                     "visible": cat_config.get("visible", True),
-                    "order": cat_config.get("order", 999)
+                    "order": cat_config.get("order", 999),
+                    "color": cat_config.get("color", None),
                 })
     cats.sort(key=lambda x: (x["order"], x["name"]))
     return cats
@@ -233,6 +255,15 @@ def toggle_category_visibility(category_id):
     
     write_config(config)
     return config["categories"][category_id]["visible"]
+
+def set_category_color(category_id, color):
+    config = read_config()
+    if "categories" not in config:
+        config["categories"] = {}
+    if category_id not in config["categories"]:
+        config["categories"][category_id] = {"visible": True, "order": 999}
+    config["categories"][category_id]["color"] = color
+    write_config(config)
 
 def create_category(name):
     ensure_data_dir()
@@ -470,17 +501,23 @@ def create_item(category_id, label, image_file=None, image_url=None, tts_text=No
         data["color"] = color
 
     if image_file:
-        dest_path = cat_path / file_stem 
+        dest_path = cat_path / file_stem
         saved_name = process_and_save_image(image_file, dest_path)
+        if not saved_name and image_url:
+            # PIL couldn't process the bytes (e.g. SVG); fall back to URL hotlink
+            data["image_path"] = image_url
     elif image_url:
         # Download and save
         img_data = download_image_from_url(image_url)
         if img_data:
-             dest_path = cat_path / file_stem 
-             saved_name = process_and_save_image(img_data, dest_path)
+            dest_path = cat_path / file_stem
+            saved_name = process_and_save_image(img_data, dest_path)
+            if not saved_name:
+                # PIL failed (e.g. SVG); fall back to URL hotlink
+                data["image_path"] = image_url
         else:
-             # Fallback to hotlink if download fails (optional, or just fail)
-             data["image_path"] = image_url
+            # Download failed; fall back to hotlink
+            data["image_path"] = image_url
 
     with open(yaml_path, "w", encoding="utf-8") as f:
         yaml.dump(data, f)

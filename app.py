@@ -24,6 +24,7 @@ from data_manager import (
     delete_category,
     rename_category,
     toggle_category_visibility,
+    set_category_color,
     toggle_item_visibility,
     move_category_up,
     move_category_down,
@@ -94,6 +95,7 @@ def setup_header():
         opacity: 0.4;
         background-color: #f3f4f6;
     }
+
 </style>
 ''')
 
@@ -130,10 +132,10 @@ def setup_header():
 is_admin_mode = {"value": False}
 is_sentence_mode = {"value": False}
 sentence_queue = []
-sentence_queue = []
-main_column = None # Global placeholder
+main_column = None
 sentence_bar_container = None
 grid_container = None
+grid_item_size = {"value": 128}
 
 # Remove default padding and gap - moved to index_page
 # ui.query('nicegui-content').classes('gap-0 p-0')
@@ -462,8 +464,12 @@ def open_add_item_dialog(category_id=None):
         ui.label("Image:").classes("text-sm font-bold mt-2")
         ui.button("Search OpenSymbols", icon="search", on_click=lambda: open_symbol_search_dialog(handle_symbol_select)).props("flat dense color=blue").classes("w-full mt-1")
 
-        uploaded_file = {"data": None}
-        
+        uploaded_file = {"data": None, "url": None}
+
+        # Image preview (hidden until an image is selected)
+        image_preview = ui.image("").classes("w-32 h-32 object-contain mx-auto mt-1")
+        image_preview.set_visibility(False)
+
         ui.upload(on_upload=lambda e: handle_file_upload(e, uploaded_file), auto_upload=True).props("accept=image/* flat dense").classes("w-full mt-1")
 
         # Symbol Search Integration
@@ -471,27 +477,33 @@ def open_add_item_dialog(category_id=None):
              # Auto-fill label if empty
              if not name_input.value:
                  name_input.value = label
-                 
-             # Download
+
+             # Always store the URL as a fallback (covers SVG and other PIL-unsupported formats)
+             uploaded_file["url"] = url
+
+             # Try to download for local storage
              data = download_image_from_url(url)
              if data:
                  uploaded_file["data"] = data
-                 ui.notify("Image downloaded & set!")
-             else:
-                 ui.notify("Failed to download image.", color="red")
+
+             # Show preview using the original URL regardless of download outcome
+             image_preview.set_source(url)
+             image_preview.set_visibility(True)
+             ui.notify("Image selected!")
 
 
         def save():
             if not cat_select.value:
                 ui.notify("Please select a category.")
                 return
-                
+
             if name_input.value:
                 ui.notify("Creating...")
                 create_item(
-                    cat_select.value, 
-                    name_input.value, 
+                    cat_select.value,
+                    name_input.value,
                     image_file=uploaded_file["data"],
+                    image_url=uploaded_file["url"],
                     tts_text=tts_input.value
                 )
                 dialog.close()
@@ -808,141 +820,153 @@ def render_sentence_bar():
         return
 
     sentence_bar_container.clear()
-    
+
     if not is_sentence_mode["value"]:
         return
 
     with sentence_bar_container:
-        with ui.card().classes("w-full sticky top-0 z-50 bg-blue-50 border-b-2 border-blue-200 mb-4 p-2 shadow-md"):
-            with ui.row().classes("w-full items-center gap-2"):
-                # Queue Display
-                # Sortable container
-                with ui.row().classes("flex-grow overflow-x-auto gap-2 p-2 bg-white rounded border border-gray-200 min-h-[5rem] items-center flex-nowrap user-select-none") as queue_container:
-                    # Add ID for SortableJS
-                    queue_container.props('id="sortable-queue"')
-                    
-                    if not sentence_queue:
-                        ui.label("Tap items to build a sentence...").classes("text-gray-400 italic ml-2")
-                    
-                    for i, item in enumerate(sentence_queue):
-                         # Small thumbnail version of item
-                         # Use ui.card for better structure, but ui.column is fine. 
-                         # IMPORTANT: data-id is helpful for tracking if we needed it, but using indices is simpler.
-                         with ui.column().classes("w-16 h-20 bg-white border rounded shadow-sm flex-shrink-0 p-1 items-center gap-0 justify-between handle cursor-move"):
-                            # Image path resolution (similar to make_item_button)
-                            img_src = None
-                            if item["image_path"]:
-                                if item["image_path"].startswith("http"):
-                                    img_src = item["image_path"]
-                                elif os.path.isabs(item["image_path"]):
-                                    try:
-                                        # Need a robustway to display, assuming DATA_DIR is available in scope or imports
-                                        rel_path = os.path.relpath(item["image_path"], str(DATA_DIR))
-                                        img_src = f"/data/{rel_path}"
-                                    except ValueError:
-                                        img_src = None
-                            
-                            if img_src:
-                                ui.image(img_src).classes("w-full h-12 object-cover rounded pointer-events-none")
-                            else:
-                                with ui.column().classes("w-full h-12 bg-gray-100 items-center justify-center rounded pointer-events-none"):
-                                    ui.icon("image").classes("text-xs text-gray-300")
-                            
-                            ui.label(item["label"]).classes("text-[10px] leading-tight text-center overflow-hidden w-full text-ellipsis pointer-events-none")
+        with ui.card().classes("w-full sticky top-0 z-50 bg-white border-b-4 border-green-400 shadow-lg p-0 mb-2"):
 
-                # Attach SortableJS to the queue_container 
-                def handle_reorder(e):
-                    try:
-                        # Correctly access nested detail
-                        detail = e.args.get('detail', {})
-                        old_idx = detail.get('oldIndex')
-                        new_idx = detail.get('newIndex')
-                        
-                        # Move item in list
-                        if old_idx is not None and new_idx is not None:
-                            if 0 <= old_idx < len(sentence_queue) and 0 <= new_idx < len(sentence_queue):
-                                item = sentence_queue.pop(old_idx)
-                                sentence_queue.insert(new_idx, item)
-                                
-                                # ui.notify(f"Moved '{item['label']}'")
-                                
-                                # Refresh the UI so the Play button gets the new order
-                                refresh_sentence_bar()
-                            else:
-                                print(f"DEBUG: Indices out of bounds: old={old_idx}, new={new_idx}, len={len(sentence_queue)}")
-                        else:
-                            print(f"DEBUG: Invalid event args: {e.args}")
-                            
-                    except Exception as ex:
-                        print(f"Sort error: {ex}")
-                        ui.notify(f"Sort error: {ex}", color="red")
+            # Row 1: Sentence strip (scrollable, taller items)
+            with ui.row().classes("w-full overflow-x-auto gap-3 p-3 bg-gray-50 min-h-[8rem] items-center flex-nowrap user-select-none") as queue_container:
+                queue_container.props('id="sortable-queue"')
 
-                # Listen for custom sort event
-                queue_container.on('sort_change', handle_reorder)
-                
-                # Initialize Sortable
-                ui.run_javascript('''
-                    var el = document.getElementById('sortable-queue');
-                    if (el) {
-                        new Sortable(el, {
-                            animation: 150,
-                            ghostClass: 'sortable-ghost',
-                            onEnd: function (evt) {
-                                // Emit custom event to NiceGUI
-                                // getElement() helper not strictly needed if we dispatch to the element itself
-                                const event = new CustomEvent('sort_change', {
-                                    detail: { oldIndex: evt.oldIndex, newIndex: evt.newIndex } 
-                                });
-                                // We need to dispatch it on the widget's DOM element that NiceGUI is listening to.
-                                // In NiceGUI 1.0+, the element ID matches the widget ID.
-                                // But here we assigned id="sortable-queue" via props.
-                                // NiceGUI listens to events on the element.
-                                el.dispatchEvent(event);
-                            }
-                        });
-                    }
-                ''')
+                if not sentence_queue:
+                    ui.label("Tap words below to build a sentence...").classes("text-gray-400 italic text-lg ml-2")
 
-                # Controls
-                with ui.row().classes("flex-shrink-0 gap-1"):
-                    def backspace():
-                        if sentence_queue:
-                            sentence_queue.pop()
-                            refresh_sentence_bar()
-                    
-                    def clear():
-                        sentence_queue.clear()
+                for i, item in enumerate(sentence_queue):
+                    img_src = None
+                    if item["image_path"]:
+                        if item["image_path"].startswith("http"):
+                            img_src = item["image_path"]
+                        elif os.path.isabs(item["image_path"]):
+                            try:
+                                rel_path = os.path.relpath(item["image_path"], str(DATA_DIR))
+                                img_src = f"/data/{rel_path}"
+                            except ValueError:
+                                img_src = None
+
+                    def remove_at(idx=i):
+                        sentence_queue.pop(idx)
                         refresh_sentence_bar()
 
-                    # Play Logic
-                    # Extract texts
-                    texts = [(item.get("tts_text") or item["label"]).replace('"', '\\"').replace("'", "\\'") for item in sentence_queue]
-                    js_array = "[" + ",".join([f'"{t}"' for t in texts]) + "]"
-                    
-                    play_js = f'''
-                        (e) => {{
-                            const texts = {js_array};
-                            window.speechSynthesis.cancel();
-                            window.speechSynthesis.resume(); // Ensure audio context is awake (iOS)
-                            
-                            let index = 0;
-                            function speakNext() {{
-                                if (index < texts.length) {{
-                                    const u = new SpeechSynthesisUtterance(texts[index]);
-                                    u.rate = 1.3; // Increased speed
-                                    u.pitch = 1.0;
-                                    u.volume = 1.0;
-                                    u.onend = () => {{ index++; speakNext(); }};
-                                    window.speechSynthesis.speak(u);
-                                }}
-                            }}
-                            speakNext();
+                    with ui.column().classes("w-20 h-24 bg-white border-2 border-gray-200 rounded-xl shadow flex-shrink-0 p-1 items-center gap-0 justify-between handle cursor-pointer relative hover:border-red-300 transition-colors").on("click", remove_at):
+                        if img_src:
+                            ui.image(img_src).classes("w-full h-14 object-cover rounded-lg pointer-events-none")
+                        else:
+                            with ui.column().classes("w-full h-14 bg-gray-100 items-center justify-center rounded-lg pointer-events-none"):
+                                ui.icon("image").classes("text-sm text-gray-300")
+                        ui.label(item["label"]).classes("text-xs font-bold leading-tight text-center overflow-hidden w-full text-ellipsis pointer-events-none")
+                        # Tap-to-remove hint
+                        ui.icon("cancel").classes("absolute -top-1 -right-1 text-base text-red-400 bg-white rounded-full pointer-events-none")
+
+            # Attach SortableJS
+            def handle_reorder(e):
+                try:
+                    detail = e.args.get('detail', {})
+                    old_idx = detail.get('oldIndex')
+                    new_idx = detail.get('newIndex')
+                    if old_idx is not None and new_idx is not None:
+                        if 0 <= old_idx < len(sentence_queue) and 0 <= new_idx < len(sentence_queue):
+                            item = sentence_queue.pop(old_idx)
+                            sentence_queue.insert(new_idx, item)
+                            refresh_sentence_bar()
+                        else:
+                            print(f"DEBUG: Indices out of bounds: old={old_idx}, new={new_idx}, len={len(sentence_queue)}")
+                    else:
+                        print(f"DEBUG: Invalid event args: {e.args}")
+                except Exception as ex:
+                    print(f"Sort error: {ex}")
+
+            queue_container.on('sort_change', handle_reorder)
+
+            def handle_spill(e):
+                try:
+                    detail = e.args.get('detail', {})
+                    old_idx = detail.get('oldIndex')
+                    if old_idx is not None and 0 <= old_idx < len(sentence_queue):
+                        sentence_queue.pop(old_idx)
+                        refresh_sentence_bar()
+                except Exception as ex:
+                    print(f"Spill remove error: {ex}")
+
+            queue_container.on('item_spilled', handle_spill)
+
+            ui.run_javascript('''
+                var el = document.getElementById('sortable-queue');
+                if (el) {
+                    new Sortable(el, {
+                        animation: 150,
+                        ghostClass: 'sortable-ghost',
+                        removeOnSpill: true,
+                        onSpill: function(evt) {
+                            el.dispatchEvent(new CustomEvent('item_spilled', {
+                                detail: { oldIndex: evt.oldIndex }
+                            }));
+                        },
+                        onEnd: function(evt) {
+                            if (evt.to === el) {
+                                el.dispatchEvent(new CustomEvent('sort_change', {
+                                    detail: { oldIndex: evt.oldIndex, newIndex: evt.newIndex }
+                                }));
+                            }
+                        }
+                    });
+                }
+            ''')
+
+            # Row 2: Controls
+            def backspace():
+                if sentence_queue:
+                    sentence_queue.pop()
+                    refresh_sentence_bar()
+
+            def clear():
+                with ui.dialog() as confirm_dlg, ui.card():
+                    ui.label("Clear the whole sentence?").classes("text-lg font-bold")
+                    with ui.row().classes("w-full justify-end gap-2 mt-4"):
+                        ui.button("Cancel", on_click=confirm_dlg.close).props("flat")
+                        def do_clear():
+                            confirm_dlg.close()
+                            sentence_queue.clear()
+                            refresh_sentence_bar()
+                        ui.button("Clear", icon="delete_sweep", on_click=do_clear).props("unelevated color=red")
+                confirm_dlg.open()
+
+            texts = [(item.get("tts_text") or item["label"]).replace('"', '\\"').replace("'", "\\'") for item in sentence_queue]
+            js_array = "[" + ",".join([f'"{t}"' for t in texts]) + "]"
+
+            play_js = f'''
+                (e) => {{
+                    const texts = {js_array};
+                    window.speechSynthesis.cancel();
+                    window.speechSynthesis.resume();
+                    let index = 0;
+                    function speakNext() {{
+                        if (index < texts.length) {{
+                            const u = new SpeechSynthesisUtterance(texts[index]);
+                            u.rate = 1.3;
+                            u.pitch = 1.0;
+                            u.volume = 1.0;
+                            u.onend = () => {{ index++; speakNext(); }};
+                            window.speechSynthesis.speak(u);
                         }}
-                    '''
-                    
-                    ui.button(icon="backspace", on_click=backspace).props("flat dense color=orange").tooltip("Backspace")
-                    ui.button(icon="delete", on_click=clear).props("flat dense color=red").tooltip("Clear All")
-                    ui.button(icon="play_arrow", on_click=None).props("round color=green icon-size=lg").on("click", js_handler=play_js)
+                    }}
+                    speakNext();
+                }}
+            '''
+
+            with ui.row().classes("w-full items-stretch px-3 py-2 bg-white gap-3"):
+                ui.button("UNDO", icon="backspace", on_click=backspace) \
+                    .props("unelevated size=xl color=orange") \
+                    .classes("flex-1 text-lg font-bold")
+                ui.button("CLEAR", icon="delete_sweep", on_click=clear) \
+                    .props("unelevated size=xl color=red") \
+                    .classes("flex-1 text-lg font-bold")
+                ui.button("SPEAK", icon="play_arrow", on_click=None) \
+                    .props("unelevated size=xl color=green") \
+                    .classes("flex-1 text-xl font-extrabold") \
+                    .on("click", js_handler=play_js)
 
 
 # --------------------------------------------------
@@ -968,210 +992,328 @@ def render_grid():
                  ui.space()
                  ui.button("Recycle Bin", icon="delete", on_click=open_recycle_bin).props("flat color=grey")
 
-        for cat in categories:
+        # Colour map: name → (items bg, header bg, header text)
+        cat_color_map = {
+            "orange": ("bg-orange-50",  "bg-orange-200",  "text-orange-900"),
+            "yellow": ("bg-yellow-50",  "bg-yellow-200",  "text-yellow-900"),
+            "green":  ("bg-green-50",   "bg-green-200",   "text-green-900"),
+            "blue":   ("bg-blue-50",    "bg-blue-200",    "text-blue-900"),
+            "purple": ("bg-purple-50",  "bg-purple-200",  "text-purple-900"),
+            "teal":   ("bg-teal-50",    "bg-teal-200",    "text-teal-900"),
+            "pink":   ("bg-pink-50",    "bg-pink-200",    "text-pink-900"),
+            "indigo": ("bg-indigo-50",  "bg-indigo-200",  "text-indigo-900"),
+            "red":    ("bg-red-50",     "bg-red-200",     "text-red-900"),
+            "gray":   ("bg-gray-50",    "bg-gray-200",    "text-gray-900"),
+        }
+        default_palette = list(cat_color_map.values())
+
+        for idx, cat in enumerate(categories):
             # Visibility Check (Category)
             is_cat_visible = cat.get("visible", True)
             if not is_cat_visible and not is_admin_mode["value"]:
                 continue
 
-            # Category Opacity
             cat_opacity = "opacity-50" if not is_cat_visible else ""
-        
-            with ui.column().classes(f"w-full mb-8 gap-0 {cat_opacity}"):
-                # Category Header
-                with ui.row().classes("w-full items-center justify-between mt-4 mb-2 border-b-2 border-blue-100"):
-                    ui.label(cat["name"]).classes("text-xl font-bold text-blue-800")
-                    
+            stored_color = cat.get("color")
+            if stored_color and stored_color.startswith("#"):
+                # Custom hex color — compute light tint for items area
+                r = int(stored_color[1:3], 16)
+                g = int(stored_color[3:5], 16)
+                b = int(stored_color[5:7], 16)
+                brightness = (r * 299 + g * 587 + b * 114) / 1000
+                header_text = "text-white" if brightness < 128 else "text-gray-900"
+                bg_header_cls, bg_header_sty = "", f"background-color:{stored_color};"
+                bg_light_cls,  bg_light_sty  = "", f"background-color:rgba({r},{g},{b},0.15);"
+            else:
+                bg_light_cls, bg_header_cls, header_text = (
+                    cat_color_map[stored_color] if stored_color in cat_color_map
+                    else default_palette[idx % len(default_palette)]
+                )
+                bg_header_sty = bg_light_sty = ""
+
+            with ui.column().classes(f"w-full mb-4 rounded-2xl overflow-hidden shadow-sm gap-0 {cat_opacity}"):
+                # Coloured category header
+                with ui.row().classes(f"w-full items-center justify-between px-4 py-3 {bg_header_cls}").style(bg_header_sty):
+                    ui.label(cat["name"]).classes(f"text-2xl font-extrabold {header_text}")
+
                     if is_admin_mode["value"]:
                         def toggle_cat_vis(c_id=cat["id"]):
                             toggle_category_visibility(c_id)
                             refresh_grid()
 
-                        def rename_cat(c_id=cat["id"], c_name=cat["name"]):
-                            with ui.dialog() as d, ui.card():
-                                ui.label(f"Rename Category '{c_name}'").classes("font-bold text-lg")
-                                new_name_input = ui.input("New Name", value=c_name).classes("w-full")
-                                
+                        def rename_cat(c_id=cat["id"], c_name=cat["name"], c_color=cat.get("color")):
+                            with ui.dialog() as d, ui.card().classes("w-96"):
+                                ui.label(f"Edit Category").classes("font-bold text-lg")
+                                new_name_input = ui.input("Name", value=c_name).classes("w-full")
+
+                                ui.label("Colour:").classes("text-sm font-bold mt-3")
+                                is_custom_init = bool(c_color and c_color.startswith("#"))
+                                selected = {"color": c_color}
+
+                                swatch_colors = {
+                                    "orange": "#fed7aa", "yellow": "#fef08a", "green":  "#bbf7d0",
+                                    "blue":   "#bfdbfe", "purple": "#e9d5ff", "teal":   "#99f6e4",
+                                    "pink":   "#fbcfe8", "indigo": "#c7d2fe", "red":    "#fecaca",
+                                    "gray":   "#e5e7eb",
+                                }
+
+                                swatch_container = ui.row().classes("gap-3 flex-wrap mt-1")
+
+                                # Custom colour input — shown when custom swatch is active
+                                custom_row = ui.row().classes("w-full items-center gap-2 mt-2")
+                                custom_row.set_visibility(is_custom_init)
+                                with custom_row:
+                                    ui.label("Custom:").classes("text-sm text-gray-600")
+                                    color_input = ui.color_input(
+                                        value=c_color if is_custom_init else "#ff6b6b"
+                                    ).classes("w-36")
+
+                                def render_swatches():
+                                    swatch_container.clear()
+                                    is_custom_sel = bool(
+                                        selected["color"] and selected["color"].startswith("#")
+                                    )
+                                    with swatch_container:
+                                        # Named swatches
+                                        for cn, hx in swatch_colors.items():
+                                            is_sel = selected["color"] == cn
+                                            border = "3px solid #1f2937" if is_sel else "2px solid #d1d5db"
+
+                                            def on_click(color=cn):
+                                                selected["color"] = color
+                                                custom_row.set_visibility(False)
+                                                render_swatches()
+
+                                            with ui.element("div").style(
+                                                f"width:36px; height:36px; border-radius:50%; background:{hx};"
+                                                f"border:{border}; cursor:pointer; display:flex;"
+                                                f"align-items:center; justify-content:center;"
+                                            ).on("click", on_click).tooltip(cn.capitalize()):
+                                                if is_sel:
+                                                    ui.icon("check").style("font-size:18px; color:#1f2937;")
+
+                                        # Custom swatch — rainbow when unset, actual hex when active
+                                        custom_sty = (
+                                            f"background-color:{selected['color']};" if is_custom_sel
+                                            else "background:conic-gradient(red,yellow,lime,cyan,blue,magenta,red);"
+                                        )
+                                        border = "3px solid #1f2937" if is_custom_sel else "2px solid #d1d5db"
+                                        icon_color = "#fff" if not is_custom_sel else "#1f2937"
+
+                                        def on_custom_click():
+                                            selected["color"] = color_input.value
+                                            custom_row.set_visibility(True)
+                                            render_swatches()
+
+                                        with ui.element("div").style(
+                                            f"width:36px; height:36px; border-radius:50%; {custom_sty}"
+                                            f"border:{border}; cursor:pointer; display:flex;"
+                                            f"align-items:center; justify-content:center;"
+                                        ).on("click", on_custom_click).tooltip("Custom colour"):
+                                            if is_custom_sel:
+                                                ui.icon("check").style(f"font-size:18px; color:{icon_color};")
+                                            else:
+                                                ui.icon("palette").style(f"font-size:16px; color:{icon_color};")
+
+                                render_swatches()
+
                                 def save():
-                                    if new_name_input.value:
-                                        if rename_category(c_id, new_name_input.value):
-                                            ui.notify(f"Renamed to {new_name_input.value}")
-                                            d.close()
-                                            refresh_grid()
-                                        else:
+                                    if not new_name_input.value:
+                                        return
+                                    new_name = new_name_input.value
+                                    # If custom wheel is open, use its current value
+                                    final_color = (
+                                        color_input.value
+                                        if selected["color"] and selected["color"].startswith("#")
+                                        else selected["color"]
+                                    )
+                                    if new_name != c_name:
+                                        if not rename_category(c_id, new_name):
                                             ui.notify("Error renaming (name exists?)", color="red")
-                                
+                                            return
+                                        final_id = new_name
+                                    else:
+                                        final_id = c_id
+                                    set_category_color(final_id, final_color)
+                                    d.close()
+                                    refresh_grid()
+
                                 ui.button("Save", on_click=save).classes("mt-4 w-full")
                             d.open()
 
                         def delete_cat(c_id=cat["id"], c_name=cat["name"]):
-                             with ui.dialog() as d, ui.card():
-                                 ui.label(f"Delete Category '{c_name}'?").classes("font-bold text-lg")
-                                 ui.label(" All items in this category will be moved to the Recycle Bin.").classes("text-sm text-gray-600")
-                                 with ui.row().classes("w-full justify-end mt-4 gap-1"):
-                                     ui.button("Cancel", on_click=d.close).props("flat")
-                                     def confirm():
-                                         delete_category(c_id)
-                                         d.close()
-                                         refresh_grid()
-                                         ui.notify(f"Deleted Category: {c_name}")
-                                     ui.button("Delete", color="red", on_click=confirm)
-                             d.open()
-                        
+                            with ui.dialog() as d, ui.card():
+                                ui.label(f"Delete Category '{c_name}'?").classes("font-bold text-lg")
+                                ui.label("All items in this category will be moved to the Recycle Bin.").classes("text-sm text-gray-600")
+                                with ui.row().classes("w-full justify-end mt-4 gap-1"):
+                                    ui.button("Cancel", on_click=d.close).props("flat")
+                                    def confirm():
+                                        delete_category(c_id)
+                                        d.close()
+                                        refresh_grid()
+                                        ui.notify(f"Deleted Category: {c_name}")
+                                    ui.button("Delete", color="red", on_click=confirm)
+                            d.open()
+
                         def move_up(c_id=cat["id"]):
                             if move_category_up(c_id):
                                 ui.notify("Moved up")
                                 refresh_grid()
-                        
+
                         def move_down(c_id=cat["id"]):
                             if move_category_down(c_id):
                                 ui.notify("Moved down")
                                 refresh_grid()
-                        
+
                         with ui.row().classes("gap-1"):
                             ui.button(icon="arrow_upward", on_click=move_up).props("flat dense color=purple round").tooltip("Move Up")
                             ui.button(icon="arrow_downward", on_click=move_down).props("flat dense color=purple round").tooltip("Move Down")
                             ui.button(icon="edit", on_click=rename_cat).props("flat dense color=blue round").tooltip("Rename Category")
                             ui.button(icon="delete", on_click=delete_cat).props("flat dense color=red round").tooltip("Delete Category")
 
-                # Items Row (Flex wrap)
+                # Items area with matching light tint
                 items = get_items(cat["id"])
-                
-                # Item Filter
                 visible_items = [i for i in items if i.get("visible", True) or is_admin_mode["value"]]
 
-                with ui.row().classes("w-full flex-wrap gap-0"):
+                with ui.row().classes(f"w-full flex-wrap gap-2 p-3 {bg_light_cls}").style(bg_light_sty):
                     for item in visible_items:
                         make_item_button(item)
-                    
+
                     if not visible_items:
                         ui.label("No items.").classes("text-gray-400 italic text-sm ml-2")
         
 
 
+@ui.page('/')
 @ui.page('/grid')
 def grid_view_page():
-    # call common header
+    global sentence_bar_container
     setup_header()
-    
-    # State for expanded categories
-    # using a set to track which category IDs are expanded
-    expanded_categories = set()
+    ui.query('.nicegui-content').classes('p-0 gap-0')
 
+    cat_color_map = {
+        "orange": ("bg-orange-50",  "bg-orange-200",  "text-orange-900"),
+        "yellow": ("bg-yellow-50",  "bg-yellow-200",  "text-yellow-900"),
+        "green":  ("bg-green-50",   "bg-green-200",   "text-green-900"),
+        "blue":   ("bg-blue-50",    "bg-blue-200",    "text-blue-900"),
+        "purple": ("bg-purple-50",  "bg-purple-200",  "text-purple-900"),
+        "teal":   ("bg-teal-50",    "bg-teal-200",    "text-teal-900"),
+        "pink":   ("bg-pink-50",    "bg-pink-200",    "text-pink-900"),
+        "indigo": ("bg-indigo-50",  "bg-indigo-200",  "text-indigo-900"),
+        "red":    ("bg-red-50",     "bg-red-200",     "text-red-900"),
+        "gray":   ("bg-gray-50",    "bg-gray-200",    "text-gray-900"),
+    }
+    default_palette = list(cat_color_map.values())
 
-    # 1. Header with Controls
-    with ui.row().classes("w-full items-center justify-between p-4 bg-gray-100 shadow-md sticky top-0 z-50"):
-        # Back button - Standard click handler (works on PC/Android)
-        ui.button(icon="arrow_back", on_click=lambda: ui.navigate.to('/')).props("flat round big")
-        
-        with ui.row().classes("items-center gap-4"):
-            # Expand/Collapse All Buttons
-            def expand_all():
-                all_cats = get_categories()
-                for cat in all_cats:
-                    expanded_categories.add(cat["id"])
-                render_all(slider.value)
+    page_col = ui.column().classes("w-full p-0 gap-0")
 
-            def collapse_all():
-                expanded_categories.clear()
-                render_all(slider.value)
+    def refresh_page():
+        global sentence_bar_container
+        page_col.clear()
+        with page_col:
+            # Header — same structure as main screen
+            with ui.row().classes("w-full items-center justify-between px-3 py-2 bg-white shadow-sm"):
+                ui.label("Dxtr Speaks").classes("text-3xl font-extrabold text-blue-900") \
+                    .on('click', lambda: ui.navigate.to('/home'))
+                with ui.row().classes("items-center gap-2"):
+                    ui.button("Large", icon="grid_view", on_click=lambda: ui.navigate.to('/home')) \
+                        .props("unelevated size=lg color=blue")
 
-            ui.button("Expand All", on_click=expand_all).props("outline sm")
-            ui.button("Collapse All", on_click=collapse_all).props("outline sm")
+                    def click_sentence_mode():
+                        is_sentence_mode["value"] = not is_sentence_mode["value"]
+                        refresh_page()
+                    if is_sentence_mode["value"]:
+                        ui.button("Build", icon="record_voice_over", on_click=click_sentence_mode) \
+                            .props("unelevated size=lg color=green")
+                    else:
+                        ui.button("Build", icon="record_voice_over", on_click=click_sentence_mode) \
+                            .props("outline size=lg color=green")
 
-            ui.label("Zoom")
-            # Default 128 (w-32)
-            slider = ui.slider(min=60, max=300, value=80, step=10).classes("w-64")
-    
-    # 2. Grid Container
-    # Use standard div with flex wrap
-    grid_container = ui.element('div').classes("w-full flex flex-wrap gap-4 p-4 justify-start content-start")
-    
-    def toggle_category(cat_id):
-        if cat_id in expanded_categories:
-            expanded_categories.remove(cat_id)
-        else:
-            expanded_categories.add(cat_id)
-        render_all(slider.value)
+                    def click_admin():
+                        if is_admin_mode["value"]:
+                            is_admin_mode["value"] = False
+                            refresh_page()
+                        else:
+                            def on_success():
+                                is_admin_mode["value"] = True
+                                refresh_page()
+                            open_pin_dialog(on_success)
+                    if is_admin_mode["value"]:
+                        ui.button("Admin", icon="settings", on_click=click_admin) \
+                            .props("unelevated size=lg color=red")
+                    else:
+                        ui.button("Admin", icon="settings", on_click=click_admin) \
+                            .props("outline size=lg color=grey")
 
-    def make_category_button(category, size_px):
-        """Create a category card that toggles expansion."""
-        cat_id = category["id"]
-        is_expanded = cat_id in expanded_categories
-        
-        # Calculate dimensions (approx same ratio as items or square?)
-        # Let's make it look like a folder or distinct card
-        height_px = size_px * 1.25
-        
-        # Style
-        bg_color = "bg-blue-100" if is_expanded else "bg-blue-50"
-        border = "border-2 border-blue-400" if is_expanded else "border border-blue-200"
-        
-        card = ui.card().classes(f"{bg_color} {border} hover:bg-blue-200 cursor-pointer flex flex-col items-center justify-center relative shadow-sm transition-all item-card p-1")
-        card.style(f"width: {size_px}px; height: {height_px}px")
-        
-        # Scaling calculations
-        icon_size = max(20, int(size_px * 0.5)) # 50% of width
-        font_size = max(10, int(size_px * 0.12)) # 12% of width
-        
-        with card:
-            # Folder Icon
-            icon_name = "folder_open" if is_expanded else "folder"
-            ui.icon(icon_name).classes("text-blue-500 mb-2").style(f"font-size: {icon_size}px")
-            
-            # Label
-            ui.label(category["name"]).classes("font-bold text-blue-900 text-center leading-tight w-full overflow-hidden text-ellipsis whitespace-nowrap block").style(f"font-size: {font_size}px")
-            
-            # Count hint?
-            # items_count = len(get_items(cat_id)) # Might be expensive to do every render if many cats
-            # ui.label(f"{items_count} items").classes("text-xs text-blue-400")
-            
-            # Expand/Collapse Indicator
-            indicator = "expand_less" if is_expanded else "expand_more"
-            # Scale indicator too, slightly smaller
-            indicator_size = max(12, int(size_px * 0.15))
-            ui.icon(indicator).classes("absolute bottom-2 right-2 text-blue-400").style(f"font-size: {indicator_size}px")
+            # Sentence bar (shared global)
+            sentence_bar_container = ui.column().classes("w-full sticky top-0 z-50 p-0")
+            render_sentence_bar()
 
-        # Standard click handler - works on PC/Android
-        card.on("click", lambda: toggle_category(cat_id))
+            # Suppress shadows/rounding on item cards inside the compact grid
+            ui.add_head_html('''<style>
+                .compact-grid .item-card { box-shadow: none !important; }
+            </style>''')
 
-    def render_all(size):
-        grid_container.clear()
-        
-        # Gather data
-        categories = get_categories()
-        
-        with grid_container:
-            for cat in categories:
-                # Visibility check
-                if not cat.get("visible", True) and not is_admin_mode["value"]:
-                    continue
-                
-                # Render Category Card
-                make_category_button(cat, size)
-                
-                # If expanded, render items immediately after
-                if cat["id"] in expanded_categories:
-                    items = get_items(cat["id"])
-                    
-                    # Wrap items in a visual group? Or just inline?
-                    # Request was "click them they add the cards within into the grid"
-                    # User also said "click the category to 'hide' the ones held within"
-                    # Inline seems best for "into the grid".
-                    
-                    # Optional: Visual separator or background for the group?
-                    # For now, just render them.
-                    
-                    visible_items = [i for i in items if i.get("visible", True) or is_admin_mode["value"]]
-                    
-                    for item in visible_items:
-                        make_item_button(item, size_px=size)
-                
-    # Initial Render
-    render_all(slider.value)
-    
-    # Bind slider with throttle
-    slider.on('update:model-value', lambda e: render_all(e.args), throttle=0.1)
+            # Categories grid container — no padding, no gaps
+            grid_div = ui.column().classes("w-full p-0 gap-0 compact-grid")
+
+            def render(size):
+                grid_item_size["value"] = size
+                grid_div.clear()
+                categories = get_categories()
+                with grid_div:
+                    if is_admin_mode["value"]:
+                        with ui.row().classes("w-full bg-gray-100 p-2 justify-start gap-4 items-center flex-wrap"):
+                            ui.button("Add Item", icon="add", on_click=lambda: open_add_item_dialog(None)) \
+                                .classes("bg-blue-600 text-white")
+                            ui.button("Add Category", icon="create_new_folder", on_click=open_add_category_dialog) \
+                                .classes("bg-blue-600 text-white")
+                            ui.space()
+                            ui.label("Item size:").classes("text-sm font-semibold text-gray-600")
+                            _slider = ui.slider(min=60, max=300, value=size, step=10).classes("w-32")
+                            _slider.on('update:model-value', lambda e: render(e.args), throttle=0.15)
+                            ui.space()
+                            ui.button("Recycle Bin", icon="delete", on_click=open_recycle_bin) \
+                                .props("flat color=grey")
+
+                    for idx, cat in enumerate(categories):
+                        if not cat.get("visible", True) and not is_admin_mode["value"]:
+                            continue
+
+                        stored_color = cat.get("color")
+                        if stored_color and stored_color.startswith("#"):
+                            r = int(stored_color[1:3], 16)
+                            g = int(stored_color[3:5], 16)
+                            b = int(stored_color[5:7], 16)
+                            brightness = (r * 299 + g * 587 + b * 114) / 1000
+                            header_text = "text-white" if brightness < 128 else "text-gray-900"
+                            bg_header_cls, bg_header_sty = "", f"background-color:{stored_color};"
+                            bg_light_cls,  bg_light_sty  = "", f"background-color:rgba({r},{g},{b},0.15);"
+                        else:
+                            bg_light_cls, bg_header_cls, header_text = (
+                                cat_color_map[stored_color] if stored_color in cat_color_map
+                                else default_palette[idx % len(default_palette)]
+                            )
+                            bg_header_sty = bg_light_sty = ""
+
+                        cat_opacity = "opacity-50" if not cat.get("visible", True) else ""
+                        with ui.column().classes(f"w-full gap-0 {cat_opacity}"):
+                            # Thin header band
+                            with ui.row().classes(f"w-full items-center px-2 py-1 {bg_header_cls}").style(bg_header_sty):
+                                ui.label(cat["name"]).classes(f"text-sm font-semibold {header_text}")
+
+                            items = get_items(cat["id"])
+                            visible_items = [i for i in items if i.get("visible", True) or is_admin_mode["value"]]
+
+                            with ui.row().classes(f"w-full flex-wrap gap-0 p-0 {bg_light_cls}").style(bg_light_sty):
+                                for item in visible_items:
+                                    make_item_button(item, size_px=size)
+                                if not visible_items:
+                                    ui.label("No items.").classes("text-gray-400 italic text-sm ml-2")
+
+            render(grid_item_size["value"])
+
+    refresh_page()
 
 def refresh_sentence_bar():
     render_sentence_bar()
@@ -1191,20 +1333,41 @@ def refresh_ui():
         # 2. Rebuild the layout
         with main_column.classes("p-0 gap-0")   :
             # Main Header
-            with ui.row().classes("w-full items-center justify-between gap-0"):
+            with ui.row().classes("w-full items-center justify-between px-3 py-2"):
                 ui.label("Dxtr Speaks").classes("text-3xl font-extrabold text-blue-900").on('click', refresh_ui)
-                with ui.row().classes("items-center gap-0"):
-                    # Navigation to Grid View
-                    ui.button(icon="grid_view", on_click=lambda: ui.navigate.to('/grid')).props("flat round color=blue").tooltip("Grid View")
+                with ui.row().classes("items-center gap-2"):
+
+                    # Grid View
+                    ui.button("Compact", icon="grid_view", on_click=lambda: ui.navigate.to('/grid')) \
+                        .props("unelevated size=lg color=blue")
 
                     # Sentence Mode Toggle
-                    def toggle_sm(e):
-                        is_sentence_mode["value"] = e.value
+                    def click_sentence_mode():
+                        is_sentence_mode["value"] = not is_sentence_mode["value"]
                         refresh_ui()
-                    ui.switch(text="Build", value=is_sentence_mode["value"], on_change=toggle_sm).props("color=green icon=record_voice_over")
-                    
-                    # Admin Toggle
-                    ui.switch(value=is_admin_mode["value"], on_change=toggle_admin).props("color=red icon=settings").tooltip("Admin Mode")
+                    if is_sentence_mode["value"]:
+                        ui.button("Build", icon="record_voice_over", on_click=click_sentence_mode) \
+                            .props("unelevated size=lg color=green")
+                    else:
+                        ui.button("Build", icon="record_voice_over", on_click=click_sentence_mode) \
+                            .props("outline size=lg color=green")
+
+                    # Admin Mode Toggle
+                    def click_admin():
+                        if is_admin_mode["value"]:
+                            is_admin_mode["value"] = False
+                            refresh_ui()
+                        else:
+                            def on_success():
+                                is_admin_mode["value"] = True
+                                refresh_ui()
+                            open_pin_dialog(on_success)
+                    if is_admin_mode["value"]:
+                        ui.button("Admin", icon="settings", on_click=click_admin) \
+                            .props("unelevated size=lg color=red")
+                    else:
+                        ui.button("Admin", icon="settings", on_click=click_admin) \
+                            .props("outline size=lg color=grey")
             
             # Sentence Bar
             sentence_bar_container = ui.column().classes("w-full sticky top-0 z-50 p-0")
@@ -1214,37 +1377,12 @@ def refresh_ui():
             grid_container = ui.column().classes("w-full p-0 gap-0")
             render_grid()
 
-def toggle_admin(e):
-    if is_admin_mode.get("locking", False):
-        return
-
-    if e.value:
-        # Turning ON -> Require PIN
-        is_admin_mode["locking"] = True # Prevent recursion
-        e.sender.value = False # Visually revert immediately
-        is_admin_mode["locking"] = False
-        
-        def on_success():
-            is_admin_mode["locking"] = True
-            e.sender.value = True # Set switch to ON
-            is_admin_mode["value"] = True
-            is_admin_mode["locking"] = False
-            refresh_ui()
-            
-        open_pin_dialog(on_success)
-            
-    else:
-        # Turning OFF -> Allow immediately
-        is_admin_mode["value"] = False
-        refresh_ui()
-        #ui.notify("Admin Mode Disabled")
-
 
 # --------------------------------------------------
 # Layout Setup
 # --------------------------------------------------
 
-@ui.page('/')
+@ui.page('/home')
 def index_page():
     global main_column
     
@@ -1253,7 +1391,7 @@ def index_page():
     # Ensure styles
     ui.query('.nicegui-content').classes('p-0 gap-0') 
     
-    with ui.column().classes("w-full max-w-screen-xl mx-auto p-4") as col:
+    with ui.column().classes("w-full p-0 gap-0") as col:
         main_column = col
         refresh_ui()
 
